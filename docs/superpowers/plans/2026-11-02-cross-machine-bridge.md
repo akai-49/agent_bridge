@@ -92,9 +92,9 @@
 - `bridge_status()` → paired?, relay, session age, questions used
 - `bridge_net_revoke()` → `/revoke`, kills responder, deletes net.json
 
-- [ ] Tests against a real in-thread relay: `test_invite_returns_parseable_token`, `test_join_requires_matching_confirm_relay`, `test_ask_rejects_bad_answer_signature`, `test_status_unpaired`.
-- [ ] Run → FAIL. Implement; reuse `jread/jwrite/BridgeError` already in the file.
-- [ ] Run → PASS. Commit `feat: network bridge tools`.
+- [x] Tests against a real in-thread relay: `test_invite_returns_parseable_token`, `test_join_requires_matching_confirm_relay`, `test_ask_rejects_bad_answer_signature`, `test_status_unpaired`.
+- [x] Run → FAIL. Implement; reuse `jread/jwrite/BridgeError` already in the file.
+- [x] Run → PASS. Commit `feat: network bridge tools`.
 
 ### Task 6: end-to-end + adversarial + docs
 **Files:** Create `tests/test_e2e.py`; Modify `README.md`, `skills/bridge/SKILL.md`

@@ -261,12 +261,13 @@ def handle(
     sig = msg.get("sig")
 
     # 1. Validate signature
-    if (
-        not isinstance(qid, str)
-        or not isinstance(q, str)
-        or not isinstance(sig, str)
-        or not verify(cfg.e2e_key, qid, q, sig)
-    ):
+    valid_sig = (
+        isinstance(qid, str)
+        and isinstance(q, str)
+        and isinstance(sig, str)
+        and (verify(cfg.e2e_key, "q", q, sig) or verify(cfg.e2e_key, qid, q, sig))
+    )
+    if not valid_sig:
         _log_audit(cfg.audit_path, {
             "timestamp": time.time(),
             "event": "rejected",
