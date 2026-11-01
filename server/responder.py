@@ -410,6 +410,8 @@ def main(
     poll_url = f"{cfg.relay_url.rstrip('/')}/poll?wait=25"
     answer_url = f"{cfg.relay_url.rstrip('/')}/answer"
 
+    rejected_qids: set[str] = set()
+
     while True:
         if stop_event is not None and stop_event.is_set():
             break
@@ -425,29 +427,50 @@ def main(
                 if resp.status == 200:
                     body = resp.read().decode("utf-8")
                     msg = json.loads(body)
-                    result = handle(msg, cfg, runner=runner)
-                    if result is not None:
-                        post_data = json.dumps(result).encode("utf-8")
-                        ans_req = urllib.request.Request(
-                            answer_url,
-                            data=post_data,
-                            headers={
-                                "Authorization": f"Bearer {cfg.session_b}",
-                                "Content-Type": "application/json",
-                            },
-                            method="POST",
-                        )
-                        with urllib.request.urlopen(ans_req, timeout=30):
-                            pass
+                    qid = msg.get("qid") if isinstance(msg, dict) else None
+                    if qid and qid in rejected_qids:
+                        if stop_event is not None:
+                            stop_event.wait(0.5)
+                        else:
+                            time.sleep(0.5)
+                    else:
+                        result = handle(msg, cfg, runner=runner)
+                        if result is not None:
+                            post_data = json.dumps(result).encode("utf-8")
+                            ans_req = urllib.request.Request(
+                                answer_url,
+                                data=post_data,
+                                headers={
+                                    "Authorization": f"Bearer {cfg.session_b}",
+                                    "Content-Type": "application/json",
+                                },
+                                method="POST",
+                            )
+                            with urllib.request.urlopen(ans_req, timeout=30):
+                                pass
+                        else:
+                            if qid:
+                                rejected_qids.add(qid)
+                            if stop_event is not None:
+                                stop_event.wait(0.5)
+                            else:
+                                time.sleep(0.5)
                 elif resp.status == 204:
                     pass
         except urllib.error.HTTPError as e:
+            e.close()
             if e.code == 401:
                 # Session revoked or expired
                 break
-            time.sleep(1.0)
+            if stop_event is not None:
+                stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
         except (urllib.error.URLError, TimeoutError, OSError):
-            time.sleep(1.0)
+            if stop_event is not None:
+                stop_event.wait(1.0)
+            else:
+                time.sleep(1.0)
 
         if once:
             break

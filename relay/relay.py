@@ -103,12 +103,21 @@ class RelayServer(ThreadingHTTPServer):
         self.clock = clock
         self.conditions: dict[int, threading.Condition] = {}
         self.conditions_lock = threading.Lock()
+        self.shutting_down = False
 
     def get_condition(self, session_id: int) -> threading.Condition:
         with self.conditions_lock:
             if session_id not in self.conditions:
                 self.conditions[session_id] = threading.Condition()
             return self.conditions[session_id]
+
+    def shutdown(self) -> None:
+        self.shutting_down = True
+        with self.conditions_lock:
+            for cond in self.conditions.values():
+                with cond:
+                    cond.notify_all()
+        super().shutdown()
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -345,6 +354,11 @@ class RelayHandler(BaseHTTPRequestHandler):
 
         with cond:
             while True:
+                if getattr(self.server, "shutting_down", False):
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+
                 conn = get_db_connection(self.server.db_path)
                 try:
                     sess_row = conn.execute(
@@ -463,6 +477,11 @@ class RelayHandler(BaseHTTPRequestHandler):
 
         with cond:
             while True:
+                if getattr(self.server, "shutting_down", False):
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+
                 conn = get_db_connection(self.server.db_path)
                 try:
                     sess_row = conn.execute(

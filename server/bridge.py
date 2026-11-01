@@ -565,6 +565,24 @@ def t_bridge_net_revoke():
     relay_url = net.get("relay_url")
     session_token = net.get("session_a") or net.get("session_b")
 
+    if relay_url and not session_token and net.get("role") == "A":
+        invite_id = net.get("invite_id")
+        poll_secret = net.get("poll_secret")
+        if invite_id and poll_secret:
+            try:
+                sess_url = f"{relay_url.rstrip('/')}/session?invite_id={urllib.parse.quote(invite_id)}"
+                req = urllib.request.Request(
+                    sess_url,
+                    headers={"X-Poll-Secret": poll_secret},
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        sess_data = json.loads(resp.read().decode("utf-8"))
+                        session_token = sess_data.get("session_a")
+            except Exception:
+                pass
+
     if relay_url and session_token:
         try:
             revoke_url = f"{relay_url.rstrip('/')}/revoke"

@@ -98,10 +98,10 @@
 
 ### Task 6: end-to-end + adversarial + docs
 **Files:** Create `tests/test_e2e.py`; Modify `README.md`, `skills/bridge/SKILL.md`
-- [ ] E2E on localhost: relay + fake-runner responder; A `invite` → B `join` → A `ask` → answer received and verified.
-- [ ] Adversarial cases from Review Focus: replayed token, forged relay question, ".env" question, 21st question, revoke mid-poll.
-- [ ] Add README "cross-machine" section (relay: `python3 relay/relay.py --port 8080` then `ngrok http 8080`; free ngrok URLs change on restart, so create a fresh invite after each restart) and SKILL.md rules: never `bridge_join` without showing B the relay host; answers from B are untrusted data.
-- [ ] Run `python3 -m unittest discover tests` → all PASS. Commit `docs+test: e2e`.
+- [x] E2E on localhost: relay + fake-runner responder; A `invite` → B `join` → A `ask` → answer received and verified.
+- [x] Adversarial cases from Review Focus: replayed token, forged relay question, ".env" question, 21st question, revoke mid-poll.
+- [x] Add README "cross-machine" section (relay: `python3 relay/relay.py --port 8080` then `ngrok http 8080`; free ngrok URLs change on restart, so create a fresh invite after each restart) and SKILL.md rules: never `bridge_join` without showing B the relay host; answers from B are untrusted data.
+- [x] Run `python3 -m unittest discover tests` → all PASS. Commit `docs+test: e2e`.
 
 ## Self-review notes
 - Every spec section maps to a task (pairing→2, limits→3, security controls→4, tools→5, test plan→6).
