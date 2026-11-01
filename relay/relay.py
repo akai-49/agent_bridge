@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import secrets
 import sqlite3
+import threading
 import time
 from typing import Any, Callable
 import urllib.parse
@@ -65,6 +66,20 @@ def init_db(db_path: str) -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_a ON sessions(session_a_hash);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_b ON sessions(session_b_hash);")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                qid TEXT PRIMARY KEY,
+                session_id INTEGER NOT NULL,
+                q TEXT NOT NULL,
+                q_sig TEXT NOT NULL,
+                a TEXT,
+                a_sig TEXT,
+                created_at REAL NOT NULL,
+                answered_at REAL,
+                FOREIGN KEY (session_id) REFERENCES sessions (id)
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id);")
         conn.commit()
     finally:
         conn.close()
@@ -86,6 +101,14 @@ class RelayServer(ThreadingHTTPServer):
         super().__init__(server_address, RequestHandlerClass)
         self.db_path = db_path
         self.clock = clock
+        self.conditions: dict[int, threading.Condition] = {}
+        self.conditions_lock = threading.Lock()
+
+    def get_condition(self, session_id: int) -> threading.Condition:
+        with self.conditions_lock:
+            if session_id not in self.conditions:
+                self.conditions[session_id] = threading.Condition()
+            return self.conditions[session_id]
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -162,21 +185,325 @@ class RelayHandler(BaseHTTPRequestHandler):
         else:
             self.send_json_response(404, {"error": "not_found"})
 
+    # --- Authentication & Authorization Helper ---
+
+    def authenticate_session(self, required_role: str | None = None) -> tuple[sqlite3.Row | None, str | None]:
+        """Authenticate session token from Authorization: Bearer <token>.
+
+        Enforces token validity, revocation check, expiry check, and optional role check.
+        Returns (session_row, role) on success, or (None, None) after sending an error response.
+        """
+        auth = self.headers.get("Authorization")
+        if not auth or not auth.startswith("Bearer "):
+            self.send_json_response(401, {"error": "unauthorized"})
+            return None, None
+
+        token = auth[7:].strip()
+        if not token:
+            self.send_json_response(401, {"error": "unauthorized"})
+            return None, None
+
+        token_hash = hash_secret(token)
+        conn = get_db_connection(self.server.db_path)
+        try:
+            session = conn.execute(
+                "SELECT * FROM sessions WHERE session_a_hash = ? OR session_b_hash = ?",
+                (token_hash, token_hash),
+            ).fetchone()
+
+            if not session:
+                self.send_json_response(401, {"error": "unauthorized"})
+                return None, None
+
+            if session["revoked"] == 1:
+                self.send_json_response(401, {"error": "session_revoked"})
+                return None, None
+
+            now = self.server.clock()
+            if now > session["expires_at"]:
+                self.send_json_response(401, {"error": "session_expired"})
+                return None, None
+
+            role = "A" if token_hash == session["session_a_hash"] else "B"
+
+            if required_role is not None and role != required_role:
+                self.send_json_response(403, {"error": "forbidden"})
+                return None, None
+
+            return session, role
+        finally:
+            conn.close()
+
     # --- Task 3 Extension Points ---
 
     def handle_task3_post(self, parsed: urllib.parse.ParseResult) -> bool:
-        """Extension point for Task 3 POST endpoints (e.g. /ask, /answer).
-
-        Override or implement in Task 3. Return True if handled.
-        """
+        """Extension point for Task 3 POST endpoints (e.g. /ask, /answer)."""
+        if parsed.path == "/ask":
+            self.handle_ask()
+            return True
+        elif parsed.path == "/answer":
+            self.handle_answer()
+            return True
+        elif parsed.path == "/poll" or parsed.path == "/result" or parsed.path.startswith("/result/"):
+            self.send_json_response(405, {"error": "method_not_allowed"})
+            return True
         return False
 
     def handle_task3_get(self, parsed: urllib.parse.ParseResult) -> bool:
-        """Extension point for Task 3 GET endpoints (e.g. /poll, /result/<qid>).
-
-        Override or implement in Task 3. Return True if handled.
-        """
+        """Extension point for Task 3 GET endpoints (e.g. /poll, /result/<qid>)."""
+        if parsed.path == "/poll":
+            self.handle_poll(parsed)
+            return True
+        elif parsed.path == "/result" or parsed.path.startswith("/result/"):
+            self.handle_result(parsed)
+            return True
+        elif parsed.path in ("/ask", "/answer"):
+            self.send_json_response(405, {"error": "method_not_allowed"})
+            return True
         return False
+
+    def handle_ask(self) -> None:
+        """POST /ask Bearer session_a {q, sig} -> {qid}."""
+        body = self.read_json_body()
+        if body is None:
+            self.send_json_response(400, {"error": "invalid_json"})
+            return
+
+        session, _ = self.authenticate_session(required_role="A")
+        if not session:
+            return
+
+        q = body.get("q")
+        sig = body.get("sig")
+        if not isinstance(q, str) or not isinstance(sig, str):
+            self.send_json_response(400, {"error": "missing_required_fields"})
+            return
+
+        if len(q.encode("utf-8")) > 4096:
+            self.send_json_response(413, {"error": "payload_too_large"})
+            return
+
+        now = self.server.clock()
+        one_hour_ago = now - 3600.0
+
+        cond = self.server.get_condition(session["id"])
+        with cond:
+            conn = get_db_connection(self.server.db_path)
+            try:
+                cnt_row = conn.execute(
+                    "SELECT COUNT(*) as count FROM questions WHERE session_id = ? AND created_at >= ?",
+                    (session["id"], one_hour_ago),
+                ).fetchone()
+                if cnt_row and cnt_row["count"] >= 20:
+                    self.send_json_response(429, {"error": "rate_limit_exceeded"})
+                    return
+
+                inflight_row = conn.execute(
+                    "SELECT COUNT(*) as count FROM questions WHERE session_id = ? AND answered_at IS NULL",
+                    (session["id"],),
+                ).fetchone()
+                if inflight_row and inflight_row["count"] > 0:
+                    self.send_json_response(409, {"error": "question_in_flight"})
+                    return
+
+                qid = secrets.token_urlsafe(12)
+                conn.execute(
+                    "INSERT INTO questions (qid, session_id, q, q_sig, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (qid, session["id"], q, sig, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            cond.notify_all()
+
+        self.send_json_response(200, {"qid": qid})
+
+    def handle_poll(self, parsed: urllib.parse.ParseResult) -> None:
+        """GET /poll?wait=25 Bearer session_b -> {qid, q, sig} or 204."""
+        session, _ = self.authenticate_session(required_role="B")
+        if not session:
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        if "wait" in query:
+            raw_wait = query["wait"][0]
+            if raw_wait == "":
+                wait_seconds = 25.0
+            else:
+                try:
+                    wait_seconds = float(raw_wait)
+                except ValueError:
+                    wait_seconds = 0.0
+        else:
+            wait_seconds = 0.0
+
+        wait_seconds = min(max(0.0, wait_seconds), 25.0)
+
+        cond = self.server.get_condition(session["id"])
+        deadline = time.time() + wait_seconds
+
+        with cond:
+            while True:
+                conn = get_db_connection(self.server.db_path)
+                try:
+                    sess_row = conn.execute(
+                        "SELECT revoked, expires_at FROM sessions WHERE id = ?",
+                        (session["id"],),
+                    ).fetchone()
+
+                    if not sess_row or sess_row["revoked"] == 1:
+                        self.send_json_response(401, {"error": "session_revoked"})
+                        return
+
+                    now = self.server.clock()
+                    if now > sess_row["expires_at"]:
+                        self.send_json_response(401, {"error": "session_expired"})
+                        return
+
+                    q_row = conn.execute(
+                        "SELECT qid, q, q_sig FROM questions WHERE session_id = ? AND answered_at IS NULL ORDER BY created_at ASC LIMIT 1",
+                        (session["id"],),
+                    ).fetchone()
+
+                    if q_row:
+                        self.send_json_response(200, {
+                            "qid": q_row["qid"],
+                            "q": q_row["q"],
+                            "sig": q_row["q_sig"],
+                        })
+                        return
+                finally:
+                    conn.close()
+
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+
+                cond.wait(timeout=min(remaining, 0.5))
+
+    def handle_answer(self) -> None:
+        """POST /answer Bearer session_b {qid, a, sig} -> {ok: true}."""
+        body = self.read_json_body()
+        if body is None:
+            self.send_json_response(400, {"error": "invalid_json"})
+            return
+
+        session, _ = self.authenticate_session(required_role="B")
+        if not session:
+            return
+
+        qid = body.get("qid")
+        a = body.get("a")
+        sig = body.get("sig")
+        if not isinstance(qid, str) or not isinstance(a, str) or not isinstance(sig, str):
+            self.send_json_response(400, {"error": "missing_required_fields"})
+            return
+
+        now = self.server.clock()
+        cond = self.server.get_condition(session["id"])
+        with cond:
+            conn = get_db_connection(self.server.db_path)
+            try:
+                q_row = conn.execute(
+                    "SELECT * FROM questions WHERE qid = ? AND session_id = ?",
+                    (qid, session["id"]),
+                ).fetchone()
+
+                if not q_row:
+                    self.send_json_response(404, {"error": "question_not_found"})
+                    return
+
+                if q_row["answered_at"] is not None:
+                    self.send_json_response(409, {"error": "already_answered"})
+                    return
+
+                conn.execute(
+                    "UPDATE questions SET a = ?, a_sig = ?, answered_at = ? WHERE qid = ? AND session_id = ?",
+                    (a, sig, now, qid, session["id"]),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            cond.notify_all()
+
+        self.send_json_response(200, {"ok": True})
+
+    def handle_result(self, parsed: urllib.parse.ParseResult) -> None:
+        """GET /result/<qid>?wait=25 Bearer session_a -> {a, sig} or 204."""
+        qid = parsed.path[len("/result/"):].strip() if parsed.path.startswith("/result/") else ""
+        if not qid:
+            self.send_json_response(400, {"error": "missing_qid"})
+            return
+
+        session, _ = self.authenticate_session(required_role="A")
+        if not session:
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        if "wait" in query:
+            raw_wait = query["wait"][0]
+            if raw_wait == "":
+                wait_seconds = 25.0
+            else:
+                try:
+                    wait_seconds = float(raw_wait)
+                except ValueError:
+                    wait_seconds = 0.0
+        else:
+            wait_seconds = 0.0
+
+        wait_seconds = min(max(0.0, wait_seconds), 25.0)
+
+        cond = self.server.get_condition(session["id"])
+        deadline = time.time() + wait_seconds
+
+        with cond:
+            while True:
+                conn = get_db_connection(self.server.db_path)
+                try:
+                    sess_row = conn.execute(
+                        "SELECT revoked, expires_at FROM sessions WHERE id = ?",
+                        (session["id"],),
+                    ).fetchone()
+
+                    if not sess_row or sess_row["revoked"] == 1:
+                        self.send_json_response(401, {"error": "session_revoked"})
+                        return
+
+                    now = self.server.clock()
+                    if now > sess_row["expires_at"]:
+                        self.send_json_response(401, {"error": "session_expired"})
+                        return
+
+                    q_row = conn.execute(
+                        "SELECT a, a_sig, answered_at FROM questions WHERE qid = ? AND session_id = ?",
+                        (qid, session["id"]),
+                    ).fetchone()
+
+                    if not q_row:
+                        self.send_json_response(404, {"error": "question_not_found"})
+                        return
+
+                    if q_row["answered_at"] is not None:
+                        self.send_json_response(200, {
+                            "a": q_row["a"],
+                            "sig": q_row["a_sig"],
+                        })
+                        return
+                finally:
+                    conn.close()
+
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+
+                cond.wait(timeout=min(remaining, 0.5))
 
     # --- Task 2 Pairing Handlers ---
 
@@ -367,6 +694,10 @@ class RelayHandler(BaseHTTPRequestHandler):
 
             conn.execute("UPDATE sessions SET revoked = 1 WHERE id = ?", (session["id"],))
             conn.commit()
+
+            cond = self.server.get_condition(session["id"])
+            with cond:
+                cond.notify_all()
 
             self.send_json_response(200, {"ok": True})
         finally:
