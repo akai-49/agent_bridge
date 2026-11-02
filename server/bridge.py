@@ -74,15 +74,37 @@ def secure_jwrite(p: Path, data: dict) -> None:
         pass
 
 
+def is_pid_alive(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _check_not_home_or_parent(folder: Path | str) -> None:
+    p = Path(folder).resolve()
+    home = Path.home().resolve()
+    if p == home or p in home.parents:
+        raise BridgeError(f"Refusing to serve user home directory or parent: {p}")
+
+
 def spawn_responder(config_path: str) -> int:
     responder_script = Path(__file__).parent / "responder.py"
-    proc = subprocess.Popen(
-        [sys.executable, str(responder_script), str(config_path)],
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=open(get_home() / "responder.log", "ab"),
-    )
+    with open(get_home() / "responder.log", "ab") as log_f:
+        proc = subprocess.Popen(
+            [sys.executable, str(responder_script), str(config_path)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log_f,
+        )
     return proc.pid
 
 
@@ -275,6 +297,9 @@ def t_bridge_join(token, confirm_relay):
     if not confirm_relay or not isinstance(confirm_relay, str):
         raise BridgeError("confirm_relay must be a non-empty string")
 
+    repo_root = cwd_path()
+    _check_not_home_or_parent(repo_root)
+
     try:
         parsed = wire.parse_token(token)
     except Exception as e:
@@ -318,13 +343,14 @@ def t_bridge_join(token, confirm_relay):
     except Exception as e:
         raise BridgeError(f"Failed to join bridge relay: {e}") from e
 
-    repo_root = cwd_path()
     config_path = get_home() / "responder_config.json"
     audit_path = get_home() / "audit.jsonl"
     config_dict = {
         "repo_root": repo_root,
         "relay_url": token_relay,
+        "session": session_b,
         "session_b": session_b,
+        "role": "B",
         "e2e_key": parsed["e2e_key"],
         "audit_path": str(audit_path),
         "max_per_hour": 30,
@@ -337,16 +363,120 @@ def t_bridge_join(token, confirm_relay):
     net_data = {
         "role": "B",
         "relay_url": token_relay,
+        "session": session_b,
         "session_b": session_b,
         "e2e_key": parsed["e2e_key"],
         "config_path": str(config_path),
         "responder_pid": pid,
+        "serving_folder": repo_root,
         "created_at": time.time(),
         "questions_used": 0,
     }
     secure_jwrite(get_net_path(), net_data)
 
     return f"Joined bridge at {token_relay}. Responder daemon started (pid: {pid})."
+
+
+def t_bridge_serve(confirm_folder):
+    if not confirm_folder or not isinstance(confirm_folder, str) or not confirm_folder.strip():
+        raise BridgeError("confirm_folder must be a non-empty string")
+
+    current_folder = cwd_path()
+    resolved_confirm = str(Path(confirm_folder.strip()).resolve())
+    if confirm_folder.strip() != current_folder and resolved_confirm != current_folder:
+        raise BridgeError(
+            f"Folder confirmation failed: '{confirm_folder}' does not match current folder '{current_folder}'"
+        )
+
+    _check_not_home_or_parent(current_folder)
+
+    net_file = get_net_path()
+    if not net_file.is_file():
+        raise BridgeError("Not paired. Call bridge_invite or bridge_join first.")
+
+    net = jread(net_file, {})
+    if not net:
+        raise BridgeError("Bridge network state is empty. Call bridge_invite or bridge_join first.")
+
+    role = net.get("role")
+    relay_url = net.get("relay_url")
+    if not relay_url:
+        raise BridgeError("Missing relay_url in network state.")
+
+    if role == "A":
+        if not net.get("session_a"):
+            invite_id = net.get("invite_id")
+            poll_secret = net.get("poll_secret")
+            if not invite_id or not poll_secret:
+                raise BridgeError("Not paired. Missing invite pairing credentials.")
+
+            sess_url = f"{relay_url.rstrip('/')}/session?invite_id={urllib.parse.quote(invite_id)}"
+            req = urllib.request.Request(
+                sess_url,
+                headers={"X-Poll-Secret": poll_secret},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status == 204:
+                        raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.")
+                    sess_data = json.loads(resp.read().decode("utf-8"))
+                    session_a = sess_data.get("session_a")
+                    if not session_a:
+                        raise BridgeError("Relay did not return session_a.")
+                    net["session_a"] = session_a
+                    secure_jwrite(net_file, net)
+            except urllib.error.HTTPError as e:
+                code = e.code
+                body = e.read().decode("utf-8", errors="replace")
+                e.close()
+                if code == 204:
+                    raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.") from e
+                if code == 401:
+                    raise BridgeError("Session revoked, expired, or invalid poll secret.") from e
+                raise BridgeError(f"Error fetching session: HTTP {code} {body}") from e
+            except BridgeError:
+                raise
+            except Exception as e:
+                raise BridgeError(f"Failed to connect to relay for session: {e}") from e
+
+        session = net["session_a"]
+    elif role == "B":
+        session = net.get("session_b") or net.get("session")
+        if not session:
+            raise BridgeError("Missing session_b in network state.")
+    else:
+        raise BridgeError(f"Invalid or missing role in network state: {role}")
+
+    existing_pid = net.get("responder_pid")
+    serving_folder = net.get("serving_folder") or current_folder
+    if existing_pid and is_pid_alive(existing_pid):
+        return f"already serving {serving_folder}"
+
+    config_path = get_home() / "responder_config.json"
+    audit_path = get_home() / "audit.jsonl"
+    config_dict = {
+        "repo_root": current_folder,
+        "relay_url": relay_url.rstrip("/"),
+        "session": session,
+        "role": role,
+        "e2e_key": net["e2e_key"],
+        "audit_path": str(audit_path),
+        "max_per_hour": 30,
+        "daily_budget": 200,
+    }
+    if role == "B":
+        config_dict["session_b"] = session
+    secure_jwrite(config_path, config_dict)
+
+    pid = spawn_responder(str(config_path))
+
+    net["responder_pid"] = pid
+    net["serving_folder"] = current_folder
+    net["config_path"] = str(config_path)
+    secure_jwrite(net_file, net)
+
+    return f"Serving {current_folder} (pid: {pid})."
 
 
 def t_bridge_ask(question):
@@ -365,52 +495,58 @@ def t_bridge_ask(question):
         raise BridgeError("Bridge network state is empty. Call bridge_invite or bridge_join first.")
 
     role = net.get("role")
-    if role != "A":
-        raise BridgeError("Only inviter (role A) can ask questions.")
+    if role not in ("A", "B"):
+        raise BridgeError(f"Invalid or missing role in network state: {role}")
 
     relay_url = net["relay_url"].rstrip("/")
 
-    # Lazily fetch session_a if not yet stored
-    if not net.get("session_a"):
-        invite_id = net.get("invite_id")
-        poll_secret = net.get("poll_secret")
-        if not invite_id or not poll_secret:
-            raise BridgeError("Missing invite pairing credentials in network state.")
+    if role == "A":
+        # Lazily fetch session_a if not yet stored
+        if not net.get("session_a"):
+            invite_id = net.get("invite_id")
+            poll_secret = net.get("poll_secret")
+            if not invite_id or not poll_secret:
+                raise BridgeError("Missing invite pairing credentials in network state.")
 
-        sess_url = f"{relay_url}/session?invite_id={urllib.parse.quote(invite_id)}"
-        req = urllib.request.Request(
-            sess_url,
-            headers={"X-Poll-Secret": poll_secret},
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status == 204:
-                    raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.")
-                sess_data = json.loads(resp.read().decode("utf-8"))
-                session_a = sess_data.get("session_a")
-                if not session_a:
-                    raise BridgeError("Relay did not return session_a.")
-                net["session_a"] = session_a
-                secure_jwrite(net_file, net)
-        except urllib.error.HTTPError as e:
-            code = e.code
-            body = e.read().decode("utf-8", errors="replace")
-            e.close()
-            if code == 204:
-                raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.") from e
-            if code == 401:
-                raise BridgeError("Session revoked, expired, or invalid poll secret.") from e
-            raise BridgeError(f"Error fetching session: HTTP {code} {body}") from e
-        except BridgeError:
-            raise
-        except Exception as e:
-            raise BridgeError(f"Failed to connect to relay for session: {e}") from e
+            sess_url = f"{relay_url}/session?invite_id={urllib.parse.quote(invite_id)}"
+            req = urllib.request.Request(
+                sess_url,
+                headers={"X-Poll-Secret": poll_secret},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status == 204:
+                        raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.")
+                    sess_data = json.loads(resp.read().decode("utf-8"))
+                    session_a = sess_data.get("session_a")
+                    if not session_a:
+                        raise BridgeError("Relay did not return session_a.")
+                    net["session_a"] = session_a
+                    secure_jwrite(net_file, net)
+            except urllib.error.HTTPError as e:
+                code = e.code
+                body = e.read().decode("utf-8", errors="replace")
+                e.close()
+                if code == 204:
+                    raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.") from e
+                if code == 401:
+                    raise BridgeError("Session revoked, expired, or invalid poll secret.") from e
+                raise BridgeError(f"Error fetching session: HTTP {code} {body}") from e
+            except BridgeError:
+                raise
+            except Exception as e:
+                raise BridgeError(f"Failed to connect to relay for session: {e}") from e
 
-    session_a = net["session_a"]
+        my_session = net["session_a"]
+    else:  # role == "B"
+        my_session = net.get("session_b") or net.get("session")
+        if not my_session:
+            raise BridgeError("Missing session_b in network state.")
+
     e2e_key = net["e2e_key"]
 
-    q_sig = wire.sign(e2e_key, wire.q_tag("A"), question)
+    q_sig = wire.sign(e2e_key, wire.q_tag(role), question)
 
     ask_url = f"{relay_url}/ask"
     ask_payload = {"q": question, "sig": q_sig}
@@ -418,7 +554,7 @@ def t_bridge_ask(question):
         ask_url,
         data=json.dumps(ask_payload).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {session_a}",
+            "Authorization": f"Bearer {my_session}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -457,7 +593,7 @@ def t_bridge_ask(question):
         result_url = f"{relay_url}/result/{urllib.parse.quote(qid)}?wait={wait_s}"
         req = urllib.request.Request(
             result_url,
-            headers={"Authorization": f"Bearer {session_a}"},
+            headers={"Authorization": f"Bearer {my_session}"},
             method="GET",
         )
         try:
@@ -484,7 +620,7 @@ def t_bridge_ask(question):
     if answer_text is None:
         raise BridgeError("Timed out waiting for answer from peer (130s).")
 
-    if not wire.verify(e2e_key, wire.a_tag("A", qid), answer_text, answer_sig):
+    if not wire.verify(e2e_key, wire.a_tag(role, qid), answer_text, answer_sig):
         raise BridgeError("Answer signature verification failed (possible tampering or wrong key).")
 
     net["questions_used"] = net.get("questions_used", 0) + 1
@@ -502,6 +638,8 @@ def t_bridge_status():
             "relay_url": None,
             "session_age": None,
             "questions_used": 0,
+            "serving": False,
+            "serving_folder": None,
         }
 
     net = jread(net_file, {})
@@ -512,6 +650,8 @@ def t_bridge_status():
             "relay_url": None,
             "session_age": None,
             "questions_used": 0,
+            "serving": False,
+            "serving_folder": None,
         }
 
     role = net.get("role")
@@ -522,7 +662,7 @@ def t_bridge_status():
 
     paired = False
     if role == "B":
-        paired = bool(net.get("session_b"))
+        paired = bool(net.get("session_b") or net.get("session"))
     elif role == "A":
         if net.get("session_a"):
             paired = True
@@ -545,12 +685,18 @@ def t_bridge_status():
             except Exception:
                 paired = False
 
+    pid = net.get("responder_pid")
+    serving = bool(pid and is_pid_alive(pid))
+    serving_folder = net.get("serving_folder") if serving else None
+
     return {
         "paired": paired,
         "role": role,
         "relay_url": relay_url,
         "session_age": session_age,
         "questions_used": questions_used,
+        "serving": serving,
+        "serving_folder": serving_folder,
     }
 
 
@@ -561,7 +707,7 @@ def t_bridge_net_revoke():
 
     net = jread(net_file, {})
     relay_url = net.get("relay_url")
-    session_token = net.get("session_a") or net.get("session_b")
+    session_token = net.get("session_a") or net.get("session_b") or net.get("session")
 
     if relay_url and not session_token and net.get("role") == "A":
         invite_id = net.get("invite_id")
@@ -618,6 +764,7 @@ def t_bridge_net_revoke():
 
 bridge_invite = t_bridge_invite
 bridge_join = t_bridge_join
+bridge_serve = t_bridge_serve
 bridge_ask = t_bridge_ask
 bridge_status = t_bridge_status
 bridge_net_revoke = t_bridge_net_revoke
@@ -651,6 +798,12 @@ TOOLS = {
         "Join a bridge session with an invite token. IMPORTANT: You MUST show the user the relay host from the token and get their explicit confirmation ('yes') before calling this tool. Pass the confirmed relay URL as confirm_relay.",
         S(token="Pairing token received from peer", confirm_relay="Relay URL confirmed by the user"),
         ["token", "confirm_relay"],
+    ),
+    "bridge_serve": (
+        t_bridge_serve,
+        "Start serving this project folder across the bridge so the peer agent can ask questions and inspect files. IMPORTANT: You MUST show the user the folder and that the peer's agent will be able to read it, and get an explicit 'yes' before calling this tool. Pass the confirmed folder as confirm_folder.",
+        S(confirm_folder="Confirmed path of the folder to serve to the peer"),
+        ["confirm_folder"],
     ),
     "bridge_ask": (
         t_bridge_ask,
@@ -689,7 +842,7 @@ def handle(req):
     if m == "initialize":
         reply(id_, {"protocolVersion": p.get("protocolVersion", "2025-03-26"),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "claude-bridge", "version": "0.1.1"}})
+                    "serverInfo": {"name": "claude-bridge", "version": "0.1.2"}})
     elif m == "tools/list":
         reply(id_, {"tools": [{"name": n, "description": d,
                                "inputSchema": {**s, "required": r}} for n, (_, d, s, r) in TOOLS.items()]})

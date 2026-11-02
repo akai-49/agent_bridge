@@ -22,7 +22,20 @@ ngrok http 8080
 1. **Invite (Machine A):** Call `bridge_invite(relay_url="https://<ngrok-host>")`. Returns a single-use pairing token containing the relay URL, invite ID, join secret, and end-to-end signing key: `brg1.<relay>.<invite_id>.<join_secret>.<e2e_key>`.
 2. **Join (Machine B):** Show the user the relay host from the token to confirm. Once confirmed with 'yes', call `bridge_join(token=..., confirm_relay="https://<ngrok-host>")`. B exchanges the token for `session_b` and spawns a background `responder.py` daemon rooted at B's repository.
 3. **Ask (Machine A):** Call `bridge_ask(question="...")`. The question is HMAC-signed with `e2e_key`, routed through the relay, verified and answered on B, signed back, and verified on A.
-4. **Revoke:** Call `bridge_net_revoke()` from either side to instantly terminate the session on the relay and stop B's responder daemon.
+4. **Revoke:** Call `bridge_net_revoke()` from either side to instantly terminate the session on the relay and stop responder daemons.
+
+### Both directions
+By default, Machine B answers questions asked by Machine A. Answering on Machine A is opt-in:
+1. **Serve (Machine A):** In Claude on Machine A:
+   `"Serve this folder to the bridge."`
+   Claude shows the folder path and confirms that the peer's agent will be able to read files inside it. When confirmed with "yes", Claude calls `bridge_serve(confirm_folder="<path>")` and spawns a read-only responder daemon for Machine A.
+2. **Ask (Machine B):** In Claude on Machine B:
+   `"Ask the frontend bridge: how is the user profile page structured?"`
+   Claude calls `bridge_ask(question="...")`, signed with `q_tag("B")` and verified with `a_tag("B", qid)`.
+
+> **Note:**
+> - Both sides need the same plugin version (0.1.2 or higher).
+> - Only the newest invite works: generating a new invite token invalidates previous invites and sessions.
 
 ### 3. Read-Only Responder Security
 - B's responder runs `claude -p` with strictly `--allowedTools Read,Grep,Glob` and `--disallowedTools Read(~/**),Read(/etc/**)`. No bash, network, or write tools are permitted.

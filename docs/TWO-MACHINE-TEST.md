@@ -26,8 +26,8 @@ Then start Claude from your **project folder** as normal (restart it if it was a
 cd ~/my-project            # A: frontend repo.  B: backend repo ROOT (see warning below)
 claude
 ```
-**Verify it loaded:** ask Claude "list your bridge tools". You should see 14 `bridge_*` tools
-(`bridge_invite`, `bridge_join`, `bridge_ask`, `bridge_status`, `bridge_net_revoke`, plus the old local ones).
+**Verify it loaded:** ask Claude "list your bridge tools". You should see 15 `bridge_*` tools
+(`bridge_invite`, `bridge_join`, `bridge_serve`, `bridge_ask`, `bridge_status`, `bridge_net_revoke`, plus the old local ones).
 Claude will ask permission the first time it uses a tool; approve it.
 
 Update later: `claude plugin marketplace update agent-bridge`. Remove: `claude plugin uninstall agent-bridge`.
@@ -71,6 +71,23 @@ ngrok http 8080
 6. **A**: *"bridge status"* → `paired: true`, `questions_used: 1`.
 7. **B** audit: `tail ~/.claude-bridge/audit.jsonl` shows the question and answer.
 8. Check http://127.0.0.1:4040 on the relay machine: `/invite`, `/join`, `/ask`, `/poll`, `/answer` all 200.
+
+## Both directions
+By default, Machine A asks and Machine B answers. To enable bi-directional Q&A so Machine B can also ask and Machine A can answer:
+
+1. **A serves:** In Claude on Machine A:
+   *"Serve this folder to the bridge."*
+   Claude will show the folder path and ask you to confirm that the peer's agent will be able to read files inside it. Confirm with *"yes"*.
+   Expect: "Serving /path/to/repo (pid N)."
+   Verify on A: `bridge status` reports `serving: true` and `serving_folder`.
+2. **B asks:** In Claude on Machine B:
+   *"Ask the frontend bridge: how is the user profile page structured?"*
+   Expect an answer grounded in A's code within ~10-30 s.
+3. Check audit log on A: `tail ~/.claude-bridge/audit.jsonl` records B's question and A's answer.
+
+> **Important notes:**
+> - Both sides need the same plugin version (0.1.2 or higher).
+> - Only the newest invite works: creating a new invite invalidates old pairing tokens and sessions.
 
 ## 4. Negative tests (all should be refused or safe)
 | A asks | Expected |
