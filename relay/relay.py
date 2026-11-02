@@ -71,6 +71,7 @@ def init_db(db_path: str) -> None:
             CREATE TABLE IF NOT EXISTS questions (
                 qid TEXT PRIMARY KEY,
                 session_id INTEGER NOT NULL,
+                asker TEXT NOT NULL DEFAULT 'A',
                 q TEXT NOT NULL,
                 q_sig TEXT NOT NULL,
                 a TEXT,
@@ -80,6 +81,9 @@ def init_db(db_path: str) -> None:
                 FOREIGN KEY (session_id) REFERENCES sessions (id)
             );
         """)
+        cols = [row["name"] for row in conn.execute("PRAGMA table_info(questions);").fetchall()]
+        if "asker" not in cols:
+            conn.execute("ALTER TABLE questions ADD COLUMN asker TEXT NOT NULL DEFAULT 'A';")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id);")
         conn.commit()
     finally:
@@ -273,14 +277,14 @@ class RelayHandler(BaseHTTPRequestHandler):
         return False
 
     def handle_ask(self) -> None:
-        """POST /ask Bearer session_a {q, sig} -> {qid}."""
+        """POST /ask Bearer session {q, sig} -> {qid}."""
         body = self.read_json_body()
         if body is None:
             self.send_json_response(400, {"error": "invalid_json"})
             return
 
-        session, _ = self.authenticate_session(required_role="A")
-        if not session:
+        session, role = self.authenticate_session()
+        if not session or not role:
             return
 
         q = body.get("q")
@@ -301,16 +305,16 @@ class RelayHandler(BaseHTTPRequestHandler):
             conn = get_db_connection(self.server.db_path)
             try:
                 cnt_row = conn.execute(
-                    "SELECT COUNT(*) as count FROM questions WHERE session_id = ? AND created_at >= ?",
-                    (session["id"], one_hour_ago),
+                    "SELECT COUNT(*) as count FROM questions WHERE session_id = ? AND asker = ? AND created_at >= ?",
+                    (session["id"], role, one_hour_ago),
                 ).fetchone()
                 if cnt_row and cnt_row["count"] >= 20:
                     self.send_json_response(429, {"error": "rate_limit_exceeded"})
                     return
 
                 inflight_row = conn.execute(
-                    "SELECT COUNT(*) as count FROM questions WHERE session_id = ? AND answered_at IS NULL",
-                    (session["id"],),
+                    "SELECT COUNT(*) as count FROM questions WHERE session_id = ? AND asker = ? AND answered_at IS NULL",
+                    (session["id"], role),
                 ).fetchone()
                 if inflight_row and inflight_row["count"] > 0:
                     self.send_json_response(409, {"error": "question_in_flight"})
@@ -318,8 +322,8 @@ class RelayHandler(BaseHTTPRequestHandler):
 
                 qid = secrets.token_urlsafe(12)
                 conn.execute(
-                    "INSERT INTO questions (qid, session_id, q, q_sig, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (qid, session["id"], q, sig, now),
+                    "INSERT INTO questions (qid, session_id, asker, q, q_sig, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (qid, session["id"], role, q, sig, now),
                 )
                 conn.commit()
             finally:
@@ -330,9 +334,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_json_response(200, {"qid": qid})
 
     def handle_poll(self, parsed: urllib.parse.ParseResult) -> None:
-        """GET /poll?wait=25 Bearer session_b -> {qid, q, sig} or 204."""
-        session, _ = self.authenticate_session(required_role="B")
-        if not session:
+        """GET /poll?wait=25 Bearer session -> {qid, asker, q, sig} or 204."""
+        session, role = self.authenticate_session()
+        if not session or not role:
             return
 
         query = urllib.parse.parse_qs(parsed.query)
@@ -377,13 +381,14 @@ class RelayHandler(BaseHTTPRequestHandler):
                         return
 
                     q_row = conn.execute(
-                        "SELECT qid, q, q_sig FROM questions WHERE session_id = ? AND answered_at IS NULL ORDER BY created_at ASC LIMIT 1",
-                        (session["id"],),
+                        "SELECT qid, asker, q, q_sig FROM questions WHERE session_id = ? AND asker != ? AND answered_at IS NULL ORDER BY created_at ASC LIMIT 1",
+                        (session["id"], role),
                     ).fetchone()
 
                     if q_row:
                         self.send_json_response(200, {
                             "qid": q_row["qid"],
+                            "asker": q_row["asker"],
                             "q": q_row["q"],
                             "sig": q_row["q_sig"],
                         })
@@ -400,14 +405,14 @@ class RelayHandler(BaseHTTPRequestHandler):
                 cond.wait(timeout=min(remaining, 0.5))
 
     def handle_answer(self) -> None:
-        """POST /answer Bearer session_b {qid, a, sig} -> {ok: true}."""
+        """POST /answer Bearer session {qid, a, sig} -> {ok: true}."""
         body = self.read_json_body()
         if body is None:
             self.send_json_response(400, {"error": "invalid_json"})
             return
 
-        session, _ = self.authenticate_session(required_role="B")
-        if not session:
+        session, role = self.authenticate_session()
+        if not session or not role:
             return
 
         qid = body.get("qid")
@@ -431,6 +436,10 @@ class RelayHandler(BaseHTTPRequestHandler):
                     self.send_json_response(404, {"error": "question_not_found"})
                     return
 
+                if q_row["asker"] == role:
+                    self.send_json_response(403, {"error": "cannot_answer_own_question"})
+                    return
+
                 if q_row["answered_at"] is not None:
                     self.send_json_response(409, {"error": "already_answered"})
                     return
@@ -448,14 +457,14 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_json_response(200, {"ok": True})
 
     def handle_result(self, parsed: urllib.parse.ParseResult) -> None:
-        """GET /result/<qid>?wait=25 Bearer session_a -> {a, sig} or 204."""
+        """GET /result/<qid>?wait=25 Bearer session -> {a, sig} or 204."""
         qid = parsed.path[len("/result/"):].strip() if parsed.path.startswith("/result/") else ""
         if not qid:
             self.send_json_response(400, {"error": "missing_qid"})
             return
 
-        session, _ = self.authenticate_session(required_role="A")
-        if not session:
+        session, role = self.authenticate_session()
+        if not session or not role:
             return
 
         query = urllib.parse.parse_qs(parsed.query)
@@ -500,12 +509,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                         return
 
                     q_row = conn.execute(
-                        "SELECT a, a_sig, answered_at FROM questions WHERE qid = ? AND session_id = ?",
+                        "SELECT asker, a, a_sig, answered_at FROM questions WHERE qid = ? AND session_id = ?",
                         (qid, session["id"]),
                     ).fetchone()
 
                     if not q_row:
                         self.send_json_response(404, {"error": "question_not_found"})
+                        return
+
+                    if q_row["asker"] != role:
+                        self.send_json_response(403, {"error": "forbidden"})
                         return
 
                     if q_row["answered_at"] is not None:

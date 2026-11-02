@@ -57,6 +57,21 @@ def parse_token(token: str) -> dict:
     }
 
 
+def q_tag(asker: str) -> str:
+    """Return signature tag for a question asked by asker ('q:' + asker)."""
+    return f"q:{asker}"
+
+
+def a_tag(asker: str, qid: str) -> str:
+    """Return signature tag for an answer to a question asked by asker ('a:' + asker + ':' + qid)."""
+    return f"a:{asker}:{qid}"
+
+
+def other(role: str) -> str:
+    """Return the peer role ('B' if role == 'A' else 'A')."""
+    return "B" if role == "A" else "A"
+
+
 def sign(key: str, qid: str, body: str) -> str:
     """Compute hex HMAC-SHA256 signature over qid + '\\n' + body."""
     msg = f"{qid}\n{body}".encode("utf-8")

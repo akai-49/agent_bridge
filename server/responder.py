@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # allow running as a script
-from server.wire import sign, verify
+from server.wire import a_tag, other, q_tag, sign, verify
 
 ALLOW_EXTENSIONS = frozenset({
     ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rb", ".rs",
@@ -32,11 +32,19 @@ ALLOW_EXTENSIONS = frozenset({
 class Cfg:
     repo_root: str
     relay_url: str
-    session_b: str
-    e2e_key: str
-    audit_path: str
+    session: str = ""
+    e2e_key: str = ""
+    audit_path: str = ""
     max_per_hour: int = 30
     daily_budget: int = 200
+    role: str = "B"
+    session_b: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.session and self.session_b:
+            self.session = self.session_b
+        if not self.session_b and self.session:
+            self.session_b = self.session
 
 
 def confine(repo_root: str, rel: str) -> str:
@@ -312,11 +320,14 @@ def handle(
     sig = msg.get("sig")
 
     # 1. Validate signature
+    peer_role = other(cfg.role)
+    asker = msg.get("asker")
     valid_sig = (
         isinstance(qid, str)
         and isinstance(q, str)
         and isinstance(sig, str)
-        and (verify(cfg.e2e_key, "q", q, sig) or verify(cfg.e2e_key, qid, q, sig))
+        and (asker is None or asker == peer_role)
+        and verify(cfg.e2e_key, q_tag(peer_role), q, sig)
     )
     if not valid_sig:
         _log_audit(cfg.audit_path, {
@@ -340,7 +351,7 @@ def handle(
 
     if len(recent_hour) >= cfg.max_per_hour or len(recent_day) >= cfg.daily_budget:
         ans_text = "Error: budget exceeded (rate limit or daily budget reached)"
-        ans_sig = sign(cfg.e2e_key, qid, ans_text)
+        ans_sig = sign(cfg.e2e_key, a_tag(peer_role, qid), ans_text)
         _log_audit(cfg.audit_path, {
             "timestamp": now,
             "event": "refused",
@@ -359,7 +370,7 @@ def handle(
             confine(cfg.repo_root, p)
         except PermissionError as e:
             ans_text = f"Error: access denied: {e}"
-            ans_sig = sign(cfg.e2e_key, qid, ans_text)
+            ans_sig = sign(cfg.e2e_key, a_tag(peer_role, qid), ans_text)
             _log_audit(cfg.audit_path, {
                 "timestamp": now,
                 "event": "refused",
@@ -415,7 +426,7 @@ def handle(
         answer = f"Error: {e}"
         status = "error"
 
-    ans_sig = sign(cfg.e2e_key, qid, answer)
+    ans_sig = sign(cfg.e2e_key, a_tag(peer_role, qid), answer)
 
     _log_audit(cfg.audit_path, {
         "timestamp": now,
@@ -435,14 +446,18 @@ def load_config(config_path: str) -> Cfg:
     """Load Cfg from a JSON configuration file."""
     with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+    role = data.get("role", "B")
+    session = data.get("session") or data.get("session_b") or ""
     return Cfg(
         repo_root=data["repo_root"],
         relay_url=data["relay_url"],
-        session_b=data["session_b"],
+        session=session,
         e2e_key=data["e2e_key"],
         audit_path=data["audit_path"],
         max_per_hour=data.get("max_per_hour", 30),
         daily_budget=data.get("daily_budget", 200),
+        role=role,
+        session_b=session,
     )
 
 
@@ -452,7 +467,7 @@ def main(
     stop_event: Any = None,
     runner: Callable[..., Any] = subprocess.run,
 ) -> None:
-    """Long-polls relay GET /poll with Bearer session_b using urllib and posts /answer."""
+    """Long-polls relay GET /poll with Bearer session using urllib and posts /answer."""
     if isinstance(config_path, Cfg):
         cfg = config_path
     else:
@@ -469,7 +484,7 @@ def main(
 
         req = urllib.request.Request(
             poll_url,
-            headers={"Authorization": f"Bearer {cfg.session_b}"},
+            headers={"Authorization": f"Bearer {cfg.session}"},
             method="GET",
         )
 
@@ -492,7 +507,7 @@ def main(
                                 answer_url,
                                 data=post_data,
                                 headers={
-                                    "Authorization": f"Bearer {cfg.session_b}",
+                                    "Authorization": f"Bearer {cfg.session}",
                                     "Content-Type": "application/json",
                                 },
                                 method="POST",

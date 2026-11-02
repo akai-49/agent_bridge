@@ -217,29 +217,24 @@ class TestRelayQueue(unittest.TestCase):
     def test_wrong_role_403(self):
         session_a, session_b = self._pair()
 
-        # B cannot call /ask
-        ask_payload = json.dumps({"q": "hi", "sig": "sig"}).encode("utf-8")
+        # A asks a question
+        ask_a = json.dumps({"q": "from A", "sig": "sig"}).encode("utf-8")
+        status, _, body = self._request(
+            "POST", "/ask", body=ask_a, headers={"Authorization": f"Bearer {session_a}"}
+        )
+        self.assertEqual(status, 200)
+        qid_a = json.loads(body.decode("utf-8"))["qid"]
+
+        # A cannot call /answer on its own question -> 403
+        ans_a = json.dumps({"qid": qid_a, "a": "ans", "sig": "sig"}).encode("utf-8")
         status, _, _ = self._request(
-            "POST", "/ask", body=ask_payload, headers={"Authorization": f"Bearer {session_b}"}
+            "POST", "/answer", body=ans_a, headers={"Authorization": f"Bearer {session_a}"}
         )
         self.assertEqual(status, 403)
 
-        # A cannot call /poll
+        # B cannot call /result on A's question -> 403
         status, _, _ = self._request(
-            "GET", "/poll?wait=1", headers={"Authorization": f"Bearer {session_a}"}
-        )
-        self.assertEqual(status, 403)
-
-        # A cannot call /answer
-        ans_payload = json.dumps({"qid": "dummy", "a": "ans", "sig": "sig"}).encode("utf-8")
-        status, _, _ = self._request(
-            "POST", "/answer", body=ans_payload, headers={"Authorization": f"Bearer {session_a}"}
-        )
-        self.assertEqual(status, 403)
-
-        # B cannot call /result/<qid>
-        status, _, _ = self._request(
-            "GET", "/result/dummy?wait=1", headers={"Authorization": f"Bearer {session_b}"}
+            "GET", f"/result/{qid_a}?wait=1", headers={"Authorization": f"Bearer {session_b}"}
         )
         self.assertEqual(status, 403)
 

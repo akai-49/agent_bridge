@@ -410,7 +410,7 @@ def t_bridge_ask(question):
     session_a = net["session_a"]
     e2e_key = net["e2e_key"]
 
-    q_sig = wire.sign(e2e_key, "q", question)
+    q_sig = wire.sign(e2e_key, wire.q_tag("A"), question)
 
     ask_url = f"{relay_url}/ask"
     ask_payload = {"q": question, "sig": q_sig}
@@ -484,11 +484,7 @@ def t_bridge_ask(question):
     if answer_text is None:
         raise BridgeError("Timed out waiting for answer from peer (130s).")
 
-    if not (
-        wire.verify(e2e_key, qid, answer_text, answer_sig)
-        or wire.verify(e2e_key, "q", answer_text, answer_sig)
-        or wire.verify(e2e_key, "a", answer_text, answer_sig)
-    ):
+    if not wire.verify(e2e_key, wire.a_tag("A", qid), answer_text, answer_sig):
         raise BridgeError("Answer signature verification failed (possible tampering or wrong key).")
 
     net["questions_used"] = net.get("questions_used", 0) + 1
