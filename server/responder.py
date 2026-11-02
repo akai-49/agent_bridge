@@ -3,6 +3,7 @@
 Long-polls relay for questions, enforces path confinement, verifies HMAC signatures,
 runs claude -p with read-only tools, redacts secrets from output, and audit-logs.
 """
+from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import json

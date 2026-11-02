@@ -1,4 +1,5 @@
 """Wire protocol helpers: token creation/parsing and HMAC signing/verification."""
+from __future__ import annotations
 import base64
 import binascii
 import hashlib

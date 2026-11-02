@@ -5,6 +5,7 @@ Lets Claude sessions running in different project folders on one machine
 exchange files and messages, gated by explicit owner->grantee grants.
 State lives in ~/.claude-bridge (override: BRIDGE_HOME).
 """
+from __future__ import annotations
 import fnmatch
 import hashlib
 import json

@@ -3,7 +3,7 @@
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/server/bridge.py --notify" }
+          { "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/server/bridge.py", "--notify"] }
         ]
       }
     ]

@@ -4,6 +4,7 @@ Handles pairing flow (/invite, /join, /session, /revoke) and routing.
 Uses stdlib ThreadingHTTPServer, sqlite3 (WAL mode, per-request connection),
 and SHA-256 hashed secrets.
 """
+from __future__ import annotations
 import argparse
 import hashlib
 import hmac
