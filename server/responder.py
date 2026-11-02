@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -135,11 +136,11 @@ def redact(text: str) -> str:
 _SECRET_GLOBS = ["**/.env*", "**/.git/**", "**/.ssh/**", "**/.aws/**", "**/*.pem", "**/*.key",
                  "**/id_rsa*", "**/id_ed25519*", "**/*credential*", "**/*secret*", "**/.npmrc"]
 DISALLOWED = ",".join(
-    [f"{t}({g})" for t in ("Read", "Grep", "Glob") for g in ["~/**", "/etc/**"] + _SECRET_GLOBS]
+    [f"{t}({g})" for t in ("Read", "Grep", "Glob") for g in ["/etc/**"] + _SECRET_GLOBS]
     + ["Bash", "Edit", "Write", "WebFetch", "WebSearch"])
 
 
-def build_cmd(question: str) -> list[str]:
+def build_cmd(question: str, repo_root: str | None = None) -> list[str]:
     """Build the claude -p command with strict read-only toolset and security prompt."""
     prompt = (
         "You are an assistant answering questions about the repository in the current working directory.\n"
@@ -150,7 +151,7 @@ def build_cmd(question: str) -> list[str]:
         "- You may only consult source and documentation files inside the repository.\n\n"
         f"Question: {question}"
     )
-    return [
+    cmd = [
         "claude",
         "-p",
         prompt,
@@ -161,6 +162,46 @@ def build_cmd(question: str) -> list[str]:
         "--max-turns",
         "8",
     ]
+    if repo_root:
+        # Code-enforced confinement: every Read/Grep/Glob call is checked by guard_main().
+        guard = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))} --guard {shlex.quote(repo_root)}"
+        settings = {"hooks": {"PreToolUse": [{"matcher": "Read|Grep|Glob",
+                                              "hooks": [{"type": "command", "command": guard}]}]}}
+        cmd += ["--settings", json.dumps(settings)]
+    return cmd
+
+
+def _check_inside(root: Path, v: str) -> None:
+    """Raise PermissionError unless v (dir or file) resolves inside root without hidden parts."""
+    if v.startswith("~"):
+        raise PermissionError(f"path outside repo: {v}")
+    p = Path(v)
+    try:
+        rel = (p if p.is_absolute() else root / p).resolve().relative_to(root)
+    except ValueError:
+        raise PermissionError(f"path outside repo: {v}") from None
+    if any(part.startswith(".") for part in rel.parts):
+        raise PermissionError(f"hidden path blocked: {v}")
+
+
+def guard_main(repo_root: str) -> int:
+    """PreToolUse hook: exit 0 = allow, exit 2 = block (reason on stderr). Fails closed."""
+    try:
+        data = json.load(sys.stdin)
+        tool, ti = data.get("tool_name"), data.get("tool_input") or {}
+        root = Path(repo_root).resolve()
+        if tool == "Read":
+            confine(repo_root, str(ti.get("file_path", "")))
+        if ti.get("path"):
+            _check_inside(root, str(ti["path"]))
+        for key in ("glob", "pattern") if tool == "Glob" else ("glob",):
+            v = str(ti.get(key) or "")
+            if v.startswith(("/", "~")) or ".." in Path(v.replace("\\", "/")).parts:
+                raise PermissionError(f"glob escapes repo: {v}")
+    except Exception as e:
+        sys.stderr.write(f"blocked by agent-bridge guard: {e}\n")
+        return 2
+    return 0
 
 
 def extract_paths(text: str) -> list[str]:
@@ -337,7 +378,7 @@ def handle(
         if k in os.environ:
             clean_env[k] = os.environ[k]
 
-    cmd = build_cmd(q)
+    cmd = build_cmd(q, cfg.repo_root)
     runner_kwargs: dict[str, Any] = {
         "cwd": cfg.repo_root,
         "timeout": 120,
@@ -487,6 +528,8 @@ def main(
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--guard":
+        sys.exit(guard_main(sys.argv[2]))
     if len(sys.argv) < 2:
         print("Usage: python3 server/responder.py <config.json>", file=sys.stderr)
         sys.exit(1)

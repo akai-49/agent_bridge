@@ -693,7 +693,7 @@ def handle(req):
     if m == "initialize":
         reply(id_, {"protocolVersion": p.get("protocolVersion", "2025-03-26"),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "claude-bridge", "version": "0.1.0"}})
+                    "serverInfo": {"name": "claude-bridge", "version": "0.1.1"}})
     elif m == "tools/list":
         reply(id_, {"tools": [{"name": n, "description": d,
                                "inputSchema": {**s, "required": r}} for n, (_, d, s, r) in TOOLS.items()]})
