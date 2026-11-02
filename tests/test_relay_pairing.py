@@ -186,8 +186,10 @@ class TestRelayPairing(unittest.TestCase):
         # Read db bytes (including wal file if present)
         db_bytes = Path(self.db_path).read_bytes()
         wal_path = Path(self.db_path + "-wal")
-        if wal_path.exists():
+        try:  # sqlite may checkpoint/delete the WAL at any moment
             db_bytes += wal_path.read_bytes()
+        except FileNotFoundError:
+            pass
 
         # Plaintext secrets must not be in the database bytes
         self.assertNotIn(join_secret.encode("utf-8"), db_bytes)
