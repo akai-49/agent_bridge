@@ -31,8 +31,7 @@ claude
 Claude will ask permission the first time it uses a tool; approve it.
 
 Update later: `claude plugin marketplace update agent-bridge`. Remove: `claude plugin uninstall agent-bridge`.
-The relay (section 2) is not part of the plugin; it runs from a clone: `git clone https://github.com/akai-49/agent_bridge`
-on the relay machine only, or from the installed copy under `~/.claude/plugins/`.
+The relay script is installed with the plugin at `~/.claude/plugins/marketplaces/agent-bridge/relay/relay.py`, so the relay machine needs no clone.
 
 > **B warning:** the folder where B runs `claude` and joins is the folder B's agent can search.
 > Start from the backend repo root, not from `~` or a parent folder.
@@ -46,7 +45,7 @@ ngrok config add-authtoken <TOKEN>     # from https://dashboard.ngrok.com/get-st
 Every session, two terminals (keep both open):
 ```bash
 # terminal 1
-python3 relay/relay.py  # run inside your clone of the repo --port 8080      # leave --host at default 127.0.0.1
+python3 ~/.claude/plugins/marketplaces/agent-bridge/relay/relay.py --port 8080      # leave --host at default 127.0.0.1
 # terminal 2
 ngrok http 8080
 ```
