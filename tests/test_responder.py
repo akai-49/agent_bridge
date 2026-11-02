@@ -1,5 +1,6 @@
 """Tests for server/responder.py (Task 4: responder)."""
 import json
+from tests.helpers import assert_denies
 import os
 from pathlib import Path
 import subprocess
@@ -198,7 +199,7 @@ class TestResponder(unittest.TestCase):
         # Deny rules must be in place
         self.assertIn("--disallowedTools", recorded_cmd)
         idx_disallowed = recorded_cmd.index("--disallowedTools")
-        self.assertEqual(recorded_cmd[idx_disallowed + 1], "Read(~/**),Read(/etc/**)")
+        assert_denies(self, recorded_cmd[idx_disallowed + 1])
 
         # Max turns must be 8
         self.assertIn("--max-turns", recorded_cmd)
@@ -306,9 +307,9 @@ class TestResponder(unittest.TestCase):
 
         self.assertNotIn("ANTHROPIC_API_KEY", passed_env)
         self.assertNotIn("CUSTOM_SECRET_ENV", passed_env)
-        # Only PATH and HOME allowed
+        # Only PATH, HOME, USER, LOGNAME allowed
         for k in passed_env.keys():
-            self.assertIn(k, ("PATH", "HOME"))
+            self.assertIn(k, ("PATH", "HOME", "USER", "LOGNAME"))
 
     def test_question_mentioning_blocked_paths_refused(self):
         runner_called = False
@@ -356,7 +357,7 @@ class TestResponder(unittest.TestCase):
         self.assertIn("--allowedTools", cmd)
         self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Read,Grep,Glob")
         self.assertIn("--disallowedTools", cmd)
-        self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], "Read(~/**),Read(/etc/**)")
+        assert_denies(self, cmd[cmd.index("--disallowedTools") + 1])
         self.assertIn("--max-turns", cmd)
         self.assertEqual(cmd[cmd.index("--max-turns") + 1], "8")
 
@@ -507,3 +508,4 @@ class TestResponder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

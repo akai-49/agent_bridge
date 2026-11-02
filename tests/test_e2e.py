@@ -1,6 +1,7 @@
 """End-to-end and adversarial tests for claude-bridge cross-machine mode (Task 6)."""
 from contextlib import contextmanager
 import json
+from tests.helpers import assert_denies
 import os
 from pathlib import Path
 import tempfile
@@ -214,7 +215,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("--allowedTools", cmd)
         self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Read,Grep,Glob")
         self.assertIn("--disallowedTools", cmd)
-        self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], "Read(~/**),Read(/etc/**)")
+        assert_denies(self, cmd[cmd.index("--disallowedTools") + 1])
         self.assertEqual(inv["cwd"], str(self.repo_b.resolve()))
         self.assertEqual(inv["timeout"], 120)
 

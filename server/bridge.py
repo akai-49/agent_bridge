@@ -20,6 +20,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # allow running as a script
 from server import wire
 
 HOME = Path(os.environ.get("BRIDGE_HOME") or Path.home() / ".claude-bridge")
@@ -79,7 +80,7 @@ def spawn_responder(config_path: str) -> int:
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=open(get_home() / "responder.log", "ab"),
     )
     return proc.pid
 

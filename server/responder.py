@@ -16,6 +16,7 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # allow running as a script
 from server.wire import sign, verify
 
 ALLOW_EXTENSIONS = frozenset({
@@ -129,6 +130,14 @@ def redact(text: str) -> str:
     return text
 
 
+# Tool-level deny rules: enforced by claude itself, not just by the prompt.
+_SECRET_GLOBS = ["**/.env*", "**/.git/**", "**/.ssh/**", "**/.aws/**", "**/*.pem", "**/*.key",
+                 "**/id_rsa*", "**/id_ed25519*", "**/*credential*", "**/*secret*", "**/.npmrc"]
+DISALLOWED = ",".join(
+    [f"{t}({g})" for t in ("Read", "Grep", "Glob") for g in ["~/**", "/etc/**"] + _SECRET_GLOBS]
+    + ["Bash", "Edit", "Write", "WebFetch", "WebSearch"])
+
+
 def build_cmd(question: str) -> list[str]:
     """Build the claude -p command with strict read-only toolset and security prompt."""
     prompt = (
@@ -147,7 +156,7 @@ def build_cmd(question: str) -> list[str]:
         "--allowedTools",
         "Read,Grep,Glob",
         "--disallowedTools",
-        "Read(~/**),Read(/etc/**)",
+        DISALLOWED,
         "--max-turns",
         "8",
     ]
@@ -250,7 +259,7 @@ def handle(
     Verifies signature with cfg.e2e_key. If unsigned or forged, returns None and logs 'rejected'.
     Enforces hourly and daily budgets.
     Confines paths mentioned in question text; refuses if blocked.
-    Calls runner with cwd=cfg.repo_root, timeout=120, scrubbed env (PATH, HOME only).
+    Calls runner with cwd=cfg.repo_root, timeout=120, scrubbed env (PATH, HOME, USER, LOGNAME only).
     Redacts answer, signs with wire.sign, logs JSONL to cfg.audit_path, and returns {qid, a, sig}.
     """
     if not isinstance(msg, dict):
@@ -320,12 +329,12 @@ def handle(
             })
             return {"qid": qid, "a": ans_text, "sig": ans_sig}
 
-    # 4. Prepare scrubbed environment (only PATH and HOME)
+    # 4. Prepare scrubbed environment (PATH, HOME, USER, LOGNAME)
     clean_env: dict[str, str] = {}
-    if "PATH" in os.environ:
-        clean_env["PATH"] = os.environ["PATH"]
-    if "HOME" in os.environ:
-        clean_env["HOME"] = os.environ["HOME"]
+    # USER/LOGNAME are needed for claude's macOS keychain login lookup.
+    for k in ("PATH", "HOME", "USER", "LOGNAME"):
+        if k in os.environ:
+            clean_env[k] = os.environ[k]
 
     cmd = build_cmd(q)
     runner_kwargs: dict[str, Any] = {
