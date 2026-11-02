@@ -1,12 +1,16 @@
 {
-  "name": "claude-bridge",
+  "name": "agent-bridge",
   "version": "0.1.0",
   "description": "Let Claude sessions in different project folders share files and messages through explicit, revocable grants.",
-  "author": { "name": "Abhishek Hiremath" },
+  "author": {
+    "name": "Abhishek Hiremath"
+  },
   "mcpServers": {
     "bridge": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server/bridge.py"]
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/server/bridge.py"
+      ]
     }
   }
 }

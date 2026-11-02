@@ -6,26 +6,33 @@ machine (A's, below) and is exposed with ngrok. Only the relay machine needs ngr
 ## 0. Prerequisites
 | Who | Needs |
 |---|---|
-| A and B | `python3` (tested on 3.9.6 and 3.14), `git`, the `claude` CLI installed **and logged in** (`claude` once, `/login`) |
-| B | Access to this repo to clone it (add B as a collaborator, or send a zip) |
+| A and B | `python3` (tested on 3.9.6 and 3.14), the `claude` CLI installed **and logged in** (`claude` once, `/login`) |
 | Relay machine | `ngrok` (`brew install ngrok`) and a free ngrok account |
 
 B's login matters most: B's responder runs `claude -p` as B, using B's account and quota.
 
 ## 1. Install the plugin (A and B, each on their own machine)
+Standard plugin install, no clone. The repo is public, so no GitHub login is needed.
+
+In a terminal:
 ```bash
-git clone git@github.com-akai:akai-49/agent_bridge.git ~/agent_bridge   # use the URL that works for you
+claude plugin marketplace add akai-49/agent_bridge
+claude plugin install agent-bridge@agent-bridge
 ```
-No `pip install`; it is stdlib-only. Start Claude with the plugin from your **project folder**:
+Or inside a running Claude session: `/plugin marketplace add akai-49/agent_bridge`, then `/plugin install agent-bridge@agent-bridge`.
+
+Then start Claude from your **project folder** as normal (restart it if it was already open):
 ```bash
 cd ~/my-project            # A: frontend repo.  B: backend repo ROOT (see warning below)
-claude --plugin-dir ~/agent_bridge
+claude
 ```
-Optional shortcut in `~/.zshrc`: `alias cb='claude --plugin-dir ~/agent_bridge'`.
-
 **Verify it loaded:** ask Claude "list your bridge tools". You should see 14 `bridge_*` tools
 (`bridge_invite`, `bridge_join`, `bridge_ask`, `bridge_status`, `bridge_net_revoke`, plus the old local ones).
 Claude will ask permission the first time it uses a tool; approve it.
+
+Update later: `claude plugin marketplace update agent-bridge`. Remove: `claude plugin uninstall agent-bridge`.
+The relay (section 2) is not part of the plugin; it runs from a clone: `git clone https://github.com/akai-49/agent_bridge`
+on the relay machine only, or from the installed copy under `~/.claude/plugins/`.
 
 > **B warning:** the folder where B runs `claude` and joins is the folder B's agent can search.
 > Start from the backend repo root, not from `~` or a parent folder.
@@ -39,7 +46,7 @@ ngrok config add-authtoken <TOKEN>     # from https://dashboard.ngrok.com/get-st
 Every session, two terminals (keep both open):
 ```bash
 # terminal 1
-python3 ~/agent_bridge/relay/relay.py --port 8080      # leave --host at default 127.0.0.1
+python3 relay/relay.py  # run inside your clone of the repo --port 8080      # leave --host at default 127.0.0.1
 # terminal 2
 ngrok http 8080
 ```
@@ -82,7 +89,7 @@ ngrok http 8080
 ## 5. Troubleshooting
 | Symptom | Cause / fix |
 |---|---|
-| No `bridge_*` tools | Not started with `--plugin-dir`, or wrong path. Run `claude plugin validate ~/agent_bridge`. |
+| No `bridge_*` tools | Plugin not installed or Claude not restarted. `claude plugin list`; re-run the two install commands. |
 | `join` works but `ask` hangs, no responder process | `cat ~/.claude-bridge/responder.log`. Common: `claude` not on PATH or not logged in as B. |
 | Answers say "Not logged in" | B's `claude` is logged out; run `claude` and `/login` on B. |
 | `ask` fails with connection error | ngrok/relay stopped or URL changed. Restart, make a **new** invite and join again. |
@@ -100,5 +107,3 @@ ngrok http 8080
 ## Known limits
 - The relay can read question/answer text (TLS in transit only). Don't send secrets through questions.
 - A secret hardcoded in a source file can still be paraphrased out of an answer.
-- The plugin name `claude-bridge` is reserved for the public plugin directory, so it can't be submitted there
-  without renaming. Loading with `--plugin-dir` is unaffected.

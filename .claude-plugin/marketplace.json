@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-bridge",
+  "description": "Let two developers' Claude agents talk across machines: A asks, B's agent answers read-only.",
+  "owner": {
+    "name": "Abhishek Hiremath",
+    "url": "https://github.com/akai-49"
+  },
+  "plugins": [
+    {
+      "name": "agent-bridge",
+      "description": "Cross-machine Claude agent bridge via a relay (one-time token pairing, read-only answers).",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}
