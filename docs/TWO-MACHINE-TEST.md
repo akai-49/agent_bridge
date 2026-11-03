@@ -59,6 +59,7 @@ ngrok http 8080
   prints `200` if reachable.
 
 ## Hosting on Render (free)
+> **Default is now open mode** (`RELAY_OPEN=1`, no key): users just create an invite, nothing to export. Steps 2-3 below only apply if you prefer a private relay: add a `RELAY_KEY` env var in Render and each inviter exports `BRIDGE_RELAY_KEY`.
 Alternatively, you can host the relay on Render's free tier instead of running ngrok locally:
 
 1. **Deploy:** Create a new Web Service or Blueprint from the GitHub repository (`render.yaml` sets up the service automatically with ephemeral disk at `/tmp/relay.db` and generates a secure `RELAY_KEY`).
