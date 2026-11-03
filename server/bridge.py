@@ -280,6 +280,10 @@ def t_bridge_invite(relay_url):
             raise BridgeError(
                 "Relay requires a relay key: set BRIDGE_RELAY_KEY in the environment you start claude from."
             ) from e
+        if code == 429:
+            raise BridgeError("Relay invite rate limit reached for your network. Try again later.") from e
+        if code == 503:
+            raise BridgeError("Relay is full right now. Try again later or use another relay.") from e
         raise BridgeError(f"Relay returned HTTP {code}: {body}") from e
     except BridgeError:
         raise
@@ -563,10 +567,13 @@ def t_bridge_ask(question):
 
     e2e_key = net["e2e_key"]
 
-    q_sig = wire.sign(e2e_key, wire.q_tag(role), question)
+    if len(question.encode("utf-8")) > 4096:
+        raise BridgeError("Question too large (max 4096 bytes).")
+    sealed_q = wire.seal(e2e_key, wire.q_tag(role), question)  # relay only sees ciphertext
+    q_sig = wire.sign(e2e_key, wire.q_tag(role), sealed_q)
 
     ask_url = f"{relay_url}/ask"
-    ask_payload = {"q": question, "sig": q_sig}
+    ask_payload = {"q": sealed_q, "sig": q_sig}
     req = urllib.request.Request(
         ask_url,
         data=json.dumps(ask_payload).encode("utf-8"),
@@ -639,6 +646,9 @@ def t_bridge_ask(question):
 
     if not wire.verify(e2e_key, wire.a_tag(role, qid), answer_text, answer_sig):
         raise BridgeError("Answer signature verification failed (possible tampering or wrong key).")
+    answer_text = wire.open_sealed(e2e_key, wire.a_tag(role, qid), answer_text)
+    if answer_text is None:
+        raise BridgeError("Answer could not be decrypted (wrong key or peer on an older plugin version).")
 
     net["questions_used"] = net.get("questions_used", 0) + 1
     secure_jwrite(net_file, net)
@@ -867,7 +877,7 @@ def handle(req):
     if m == "initialize":
         reply(id_, {"protocolVersion": p.get("protocolVersion", "2025-03-26"),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "claude-bridge", "version": "0.1.2"}})
+                    "serverInfo": {"name": "agent-bridge", "version": "0.2.0"}})
     elif m == "tools/list":
         reply(id_, {"tools": [{"name": n, "description": d,
                                "inputSchema": {**s, "required": r}} for n, (_, d, s, r) in TOOLS.items()]})

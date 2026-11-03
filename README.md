@@ -54,3 +54,19 @@ By default, Machine B answers questions asked by Machine A. Answering on Machine
 ### 5. Known Limits
 - **Relay visibility:** While questions and answers are HMAC-signed end-to-end to guarantee authenticity and integrity, the relay sees plaintext Q&A in transit (transport security relies on HTTPS/TLS).
 - **Source secret leakage:** Redaction filters known credentials, but hardcoded secrets in source code files can potentially leak if paraphrased by the language model. Never commit plain secrets to source repositories.
+
+## Public / open relay
+Run one shared relay for many developers without handing everyone a key.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `RELAY_OPEN=1` (or `--open`) | off | Allow a public bind with no `RELAY_KEY`. If `RELAY_KEY` is also set, `/invite` still requires it. |
+| `RELAY_TRUST_PROXY=1` | off | Rate-limit by the rightmost `X-Forwarded-For` entry (set this behind Render/nginx; never otherwise). |
+| `RELAY_INVITES_PER_IP_HOUR` | 10 | Invites per client IP per hour (429 beyond). |
+| `RELAY_JOIN_FAILS_PER_IP_HOUR` | 30 | Failed joins per IP per hour (429). |
+| `RELAY_MAX_PENDING_INVITES` / `RELAY_MAX_SESSIONS` | 1000 / 500 | Global caps (503 `relay_full`). |
+| `RELAY_DB` | `relay.db` | SQLite path. Put it on a persistent disk or pairings reset on restart (free Render is ephemeral). |
+
+- Questions and answers are **end-to-end encrypted** (HMAC-SHA256 CTR + encrypt-then-MAC, key only inside the invite token). The operator sees ciphertext, plus metadata: IPs, timing, sizes.
+- Expired invites/sessions are purged automatically; request bodies over 256 KB are rejected.
+- **Both sides must run plugin 0.2.0+** (not wire-compatible with 0.1.x). Clients only need `BRIDGE_RELAY_KEY` if the relay sets `RELAY_KEY`.

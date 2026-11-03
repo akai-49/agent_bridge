@@ -76,6 +76,22 @@ Alternatively, you can host the relay on Render's free tier instead of running n
    prints `ok`.
 5. **Note on Free Tier Sleep & Ephemeral State:** Render's free tier spins down after 15 minutes of inactivity. When a request arrives, it wakes up (taking ~50s); the bridge and responder clients will automatically retry with backoff. Because disk storage on the free tier is ephemeral (`/tmp/relay.db`), any restart wipes existing sessions and invites. When the relay restarts, run a fresh `bridge_invite` on A and `bridge_join` on B to re-pair.
 
+## Public / open relay
+Run one shared relay for many developers without handing everyone a key.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `RELAY_OPEN=1` (or `--open`) | off | Allow a public bind with no `RELAY_KEY`. If `RELAY_KEY` is also set, `/invite` still requires it. |
+| `RELAY_TRUST_PROXY=1` | off | Rate-limit by the rightmost `X-Forwarded-For` entry (set this behind Render/nginx; never otherwise). |
+| `RELAY_INVITES_PER_IP_HOUR` | 10 | Invites per client IP per hour (429 beyond). |
+| `RELAY_JOIN_FAILS_PER_IP_HOUR` | 30 | Failed joins per IP per hour (429). |
+| `RELAY_MAX_PENDING_INVITES` / `RELAY_MAX_SESSIONS` | 1000 / 500 | Global caps (503 `relay_full`). |
+| `RELAY_DB` | `relay.db` | SQLite path. Put it on a persistent disk or pairings reset on restart (free Render is ephemeral). |
+
+- Questions and answers are **end-to-end encrypted** (HMAC-SHA256 CTR + encrypt-then-MAC, key only inside the invite token). The operator sees ciphertext, plus metadata: IPs, timing, sizes.
+- Expired invites/sessions are purged automatically; request bodies over 256 KB are rejected.
+- **Both sides must run plugin 0.2.0+** (not wire-compatible with 0.1.x). Clients only need `BRIDGE_RELAY_KEY` if the relay sets `RELAY_KEY`.
+
 ## 3. The test
 1. **A** (in Claude): *"Create a bridge invite using relay https://YOUR-URL and show me the token."*
    Expect a long `brg1.…` string. Token is single-use and expires in 15 minutes.

@@ -125,8 +125,8 @@ class TestRelayQueue(unittest.TestCase):
     def test_413_oversize(self):
         session_a, session_b = self._pair()
 
-        # Exactly 4096 bytes is allowed
-        q_4096 = "a" * 4096
+        # Exactly 8192 bytes (sealed cap) is allowed
+        q_4096 = "a" * 8192
         payload_ok = json.dumps({"q": q_4096, "sig": "sig"}).encode("utf-8")
         status, _, body = self._request(
             "POST", "/ask", body=payload_ok, headers={"Authorization": f"Bearer {session_a}"}
@@ -142,8 +142,8 @@ class TestRelayQueue(unittest.TestCase):
         )
         self.assertEqual(status, 200)
 
-        # 4097 bytes exceeds limit -> 413
-        q_4097 = "a" * 4097
+        # 8193 bytes exceeds limit -> 413
+        q_4097 = "a" * 8193
         payload_too_big = json.dumps({"q": q_4097, "sig": "sig"}).encode("utf-8")
         status, _, _ = self._request(
             "POST", "/ask", body=payload_too_big, headers={"Authorization": f"Bearer {session_a}"}

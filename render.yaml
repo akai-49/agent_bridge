@@ -12,6 +12,8 @@ services:
         value: 0.0.0.0
       - key: RELAY_DB
         value: /tmp/relay.db
+      - key: RELAY_TRUST_PROXY
+        value: "1"
       - key: RELAY_KEY
         generateValue: true
       - key: PYTHON_VERSION

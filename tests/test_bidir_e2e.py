@@ -292,6 +292,17 @@ class TestBidirEndToEnd(unittest.TestCase):
             ans_from_a = bridge.bridge_ask("What frontend components are in index.js?")
             self.assertEqual(ans_from_a, "Answer from A: frontend button component in index.js.")
 
+        # Relay DB (and WAL) must hold only ciphertext, never the plaintext Q&A
+        blob = b""
+        for suffix in ("", "-wal"):
+            try:
+                blob += open(self.relay_db + suffix, "rb").read()
+            except FileNotFoundError:
+                pass
+        self.assertGreater(len(blob), 0)
+        for secret in (b"How does authentication", b"JWT token", b"frontend button component", b"What frontend components"):
+            self.assertNotIn(secret, blob)
+
         # Step 6: Verify audit logs
         audit_b = (self.home_b / "audit.jsonl").read_text().strip().splitlines()
         self.assertTrue(len(audit_b) >= 1)

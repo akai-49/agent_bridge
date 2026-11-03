@@ -20,7 +20,7 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # allow running as a script
 from server.http_client import relay_urlopen
-from server.wire import a_tag, other, q_tag, sign, verify
+from server.wire import a_tag, open_sealed, other, q_tag, seal, sign, verify
 
 ALLOW_EXTENSIONS = frozenset({
     ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".rb", ".rs",
@@ -300,6 +300,13 @@ def _get_history(cfg: Cfg) -> list[float]:
     return history
 
 
+def _reply(cfg: Cfg, peer_role: str, qid: str, text: str) -> dict[str, Any]:
+    """Seal (encrypt) the answer so the relay only sees ciphertext, then sign the ciphertext."""
+    tag = a_tag(peer_role, qid)
+    sealed = seal(cfg.e2e_key, tag, text)
+    return {"qid": qid, "a": sealed, "sig": sign(cfg.e2e_key, tag, sealed)}
+
+
 def handle(
     msg: dict[str, Any],
     cfg: Cfg,
@@ -330,6 +337,12 @@ def handle(
         and (asker is None or asker == peer_role)
         and verify(cfg.e2e_key, q_tag(peer_role), q, sig)
     )
+    if valid_sig:
+        q_plain = open_sealed(cfg.e2e_key, q_tag(peer_role), q)
+        if q_plain is None:
+            valid_sig = False
+        else:
+            q = q_plain
     if not valid_sig:
         _log_audit(cfg.audit_path, {
             "timestamp": time.time(),
@@ -352,7 +365,6 @@ def handle(
 
     if len(recent_hour) >= cfg.max_per_hour or len(recent_day) >= cfg.daily_budget:
         ans_text = "Error: budget exceeded (rate limit or daily budget reached)"
-        ans_sig = sign(cfg.e2e_key, a_tag(peer_role, qid), ans_text)
         _log_audit(cfg.audit_path, {
             "timestamp": now,
             "event": "refused",
@@ -362,7 +374,7 @@ def handle(
             "a": ans_text,
             "reason": "budget_exceeded",
         })
-        return {"qid": qid, "a": ans_text, "sig": ans_sig}
+        return _reply(cfg, peer_role, qid, ans_text)
 
     # 3. Check paths mentioned in question text
     paths = extract_paths(q)
@@ -371,7 +383,6 @@ def handle(
             confine(cfg.repo_root, p)
         except PermissionError as e:
             ans_text = f"Error: access denied: {e}"
-            ans_sig = sign(cfg.e2e_key, a_tag(peer_role, qid), ans_text)
             _log_audit(cfg.audit_path, {
                 "timestamp": now,
                 "event": "refused",
@@ -381,7 +392,7 @@ def handle(
                 "a": ans_text,
                 "reason": str(e),
             })
-            return {"qid": qid, "a": ans_text, "sig": ans_sig}
+            return _reply(cfg, peer_role, qid, ans_text)
 
     # 4. Prepare scrubbed environment (PATH, HOME, USER, LOGNAME)
     clean_env: dict[str, str] = {}
@@ -427,8 +438,6 @@ def handle(
         answer = f"Error: {e}"
         status = "error"
 
-    ans_sig = sign(cfg.e2e_key, a_tag(peer_role, qid), answer)
-
     _log_audit(cfg.audit_path, {
         "timestamp": now,
         "event": status,
@@ -440,7 +449,7 @@ def handle(
 
     history.append(now)
 
-    return {"qid": qid, "a": answer, "sig": ans_sig}
+    return _reply(cfg, peer_role, qid, answer)
 
 
 def load_config(config_path: str) -> Cfg:

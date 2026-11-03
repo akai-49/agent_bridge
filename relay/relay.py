@@ -24,6 +24,28 @@ JOIN_FAILED_BODY = b'{"error": "invalid_or_expired_invite"}\n'
 
 INVITE_TTL_SECONDS = 15 * 60.0  # 15 minutes
 SESSION_TTL_SECONDS = 8 * 3600.0  # 8 hours
+MAX_BODY_BYTES = 256 * 1024
+MAX_SEALED_Q_BYTES = 8192  # clients seal (encrypt) questions; 4096-byte plaintext limit is enforced client-side
+PURGE_INTERVAL_SECONDS = 60.0
+
+
+class BodyTooLarge(Exception):
+    pass
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def validate_bind(host: str, relay_key: str | None, open_mode: bool) -> str | None:
+    """Return an error message if this bind would expose an unprotected relay, else None."""
+    if host in {"127.0.0.1", "localhost", "::1"} or relay_key or open_mode:
+        return None
+    return (f"RELAY_KEY is required when binding to non-loopback host '{host}' "
+            "(or set RELAY_OPEN=1 to run an open public relay).")
 
 
 def hash_secret(secret: str) -> str:
@@ -112,6 +134,14 @@ class RelayServer(ThreadingHTTPServer):
         self.relay_key = relay_key if relay_key is not None else os.environ.get("RELAY_KEY")
         self.conditions: dict[int, threading.Condition] = {}
         self.conditions_lock = threading.Lock()
+        self.trust_proxy = os.environ.get("RELAY_TRUST_PROXY") == "1"
+        self.invites_per_ip_hour = _env_int("RELAY_INVITES_PER_IP_HOUR", 10)
+        self.join_fails_per_ip_hour = _env_int("RELAY_JOIN_FAILS_PER_IP_HOUR", 30)
+        self.max_pending_invites = _env_int("RELAY_MAX_PENDING_INVITES", 1000)
+        self.max_sessions = _env_int("RELAY_MAX_SESSIONS", 500)
+        self._hits: dict[tuple[str, str], list[float]] = {}
+        self._hits_lock = threading.Lock()
+        self._last_purge = 0.0
         self.shutting_down = False
 
     def get_condition(self, session_id: int) -> threading.Condition:
@@ -119,6 +149,45 @@ class RelayServer(ThreadingHTTPServer):
             if session_id not in self.conditions:
                 self.conditions[session_id] = threading.Condition()
             return self.conditions[session_id]
+
+    def hits(self, bucket: str, ip: str) -> int:
+        """Number of events recorded for (bucket, ip) in the last hour."""
+        cutoff = self.clock() - 3600.0
+        with self._hits_lock:
+            lst = [t for t in self._hits.get((bucket, ip), []) if t > cutoff]
+            if lst:
+                self._hits[(bucket, ip)] = lst
+            else:
+                self._hits.pop((bucket, ip), None)
+            return len(lst)
+
+    def record_hit(self, bucket: str, ip: str) -> None:
+        with self._hits_lock:
+            self._hits.setdefault((bucket, ip), []).append(self.clock())
+
+    def purge(self) -> None:
+        """Delete expired invites/sessions and their questions; drop stale limiter entries."""
+        now = self.clock()
+        self._last_purge = now
+        conn = get_db_connection(self.db_path)
+        try:
+            conn.execute("DELETE FROM questions WHERE session_id IN (SELECT id FROM sessions WHERE expires_at < ?)", (now,))
+            conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+            conn.execute("DELETE FROM invites WHERE status = 'pending' AND expires_at < ?", (now,))
+            conn.execute("DELETE FROM invites WHERE status = 'used' AND invite_id NOT IN (SELECT invite_id FROM sessions)")
+            conn.commit()
+        finally:
+            conn.close()
+        cutoff = now - 3600.0
+        with self._hits_lock:
+            for k in list(self._hits):
+                self._hits[k] = [t for t in self._hits[k] if t > cutoff]
+                if not self._hits[k]:
+                    del self._hits[k]
+
+    def maybe_purge(self) -> None:
+        if self.clock() - self._last_purge >= PURGE_INTERVAL_SECONDS:
+            self.purge()
 
     def shutdown(self) -> None:
         self.shutting_down = True
@@ -164,6 +233,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             length = int(length_header)
         except ValueError:
             return None
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise BodyTooLarge()
         raw = self.rfile.read(length)
         if not raw.strip():
             return {}
@@ -176,6 +247,21 @@ class RelayHandler(BaseHTTPRequestHandler):
             return None
 
     def do_POST(self) -> None:
+        try:
+            self._do_post()
+        except BodyTooLarge:
+            self.close_connection = True
+            self.send_json_response(413, {"error": "payload_too_large"})
+
+    def client_ip(self) -> str:
+        if self.server.trust_proxy:
+            xff = self.headers.get("X-Forwarded-For") or ""
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if parts:
+                return parts[-1]  # rightmost = added by our own proxy; leftmost is client-controlled
+        return self.client_address[0]
+
+    def _do_post(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/invite":
             self.handle_invite()
@@ -308,7 +394,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.send_json_response(400, {"error": "missing_required_fields"})
             return
 
-        if len(q.encode("utf-8")) > 4096:
+        if len(q.encode("utf-8")) > MAX_SEALED_Q_BYTES:
             self.send_json_response(413, {"error": "payload_too_large"})
             return
 
@@ -571,6 +657,24 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.send_json_response(400, {"error": "invalid_json"})
             return
 
+        srv = self.server
+        srv.maybe_purge()
+        ip = self.client_ip()
+        if srv.hits("invite", ip) >= srv.invites_per_ip_hour:
+            self.send_json_response(429, {"error": "rate_limited"})
+            return
+        conn = get_db_connection(srv.db_path)
+        try:
+            now = srv.clock()
+            pending = conn.execute("SELECT COUNT(*) FROM invites WHERE status = 'pending' AND expires_at >= ?", (now,)).fetchone()[0]
+            active = conn.execute("SELECT COUNT(*) FROM sessions WHERE revoked = 0 AND expires_at >= ?", (now,)).fetchone()[0]
+        finally:
+            conn.close()
+        if pending >= srv.max_pending_invites or active >= srv.max_sessions:
+            self.send_json_response(503, {"error": "relay_full"})
+            return
+        srv.record_hit("invite", ip)
+
         now = self.server.clock()
         expires_at = now + INVITE_TTL_SECONDS
         invite_id = secrets.token_urlsafe(16)
@@ -613,6 +717,13 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.send_json_response(400, {"error": "missing_required_fields"})
             return
 
+        srv = self.server
+        srv.maybe_purge()
+        ip = self.client_ip()
+        if srv.hits("joinfail", ip) >= srv.join_fails_per_ip_hour:
+            self.send_json_response(429, {"error": "rate_limited"})
+            return
+
         conn = get_db_connection(self.server.db_path)
         try:
             invite = conn.execute("SELECT * FROM invites WHERE invite_id = ?", (invite_id,)).fetchone()
@@ -621,12 +732,12 @@ class RelayHandler(BaseHTTPRequestHandler):
                 dummy_hash = hashlib.sha256(b"dummy_salt_not_found").hexdigest()
                 cand_hash = hash_secret(join_secret)
                 hmac.compare_digest(cand_hash, dummy_hash)
-                self.send_join_failed()
+                srv.record_hit("joinfail", ip); self.send_join_failed()
                 return
 
             cand_hash = hash_secret(join_secret)
             if not hmac.compare_digest(cand_hash, invite["join_secret_hash"]):
-                self.send_join_failed()
+                srv.record_hit("joinfail", ip); self.send_join_failed()
                 return
 
             if invite["status"] == "used":
@@ -635,7 +746,7 @@ class RelayHandler(BaseHTTPRequestHandler):
 
             now = self.server.clock()
             if now > invite["expires_at"]:
-                self.send_join_failed()
+                srv.record_hit("joinfail", ip); self.send_join_failed()
                 return
 
             session_a = secrets.token_urlsafe(32)
@@ -787,12 +898,15 @@ def main() -> None:
     parser.add_argument("--host", default=default_host, help=f"Host to bind to (default: {default_host})")
     parser.add_argument("--port", type=int, default=default_port, help=f"Port to bind to (default: {default_port})")
     parser.add_argument("--db", default=default_db, help=f"Path to SQLite database (default: {default_db})")
+    parser.add_argument("--open", action="store_true", help="Public relay: no RELAY_KEY required (per-IP limits and caps apply)")
     args = parser.parse_args()
 
     relay_key = os.environ.get("RELAY_KEY")
-    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
-    if args.host not in loopback_hosts and not relay_key:
-        sys.exit(f"Error: RELAY_KEY environment variable is required when binding to non-loopback host '{args.host}'.")
+    open_mode = args.open or os.environ.get("RELAY_OPEN") == "1"
+    err = validate_bind(args.host, relay_key, open_mode)
+    if err:
+        sys.exit(f"Error: {err}")
+    print("Mode:", "key required for /invite" if relay_key else ("OPEN (no key, rate-limited)" if open_mode else "loopback, no key"), flush=True)
 
     server = make_server(args.db, args.host, args.port, relay_key=relay_key)
     print(f"Relay serving on http://{args.host}:{args.port} (db: {args.db})")

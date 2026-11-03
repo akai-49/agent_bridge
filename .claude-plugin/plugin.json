@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Let Claude sessions in different project folders share files and messages through explicit, revocable grants.",
   "author": {
     "name": "Abhishek Hiremath"

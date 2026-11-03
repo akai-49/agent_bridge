@@ -84,3 +84,51 @@ def verify(key: str, qid: str, body: str, sig: str) -> bool:
         return False
     expected = sign(key, qid, body)
     return hmac.compare_digest(expected, sig)
+
+
+# --- End-to-end encryption of question/answer text -------------------------------------
+# The relay must not read Q&A. The stdlib has no AES, so: HMAC-SHA256 in counter mode as the
+# keystream (a PRF with a fresh random nonce per message) + encrypt-then-MAC. The tag (who asked,
+# which qid) is bound into the MAC so a sealed question can never be replayed as an answer.
+import os as _os
+
+
+def _subkey(key: str, label: bytes) -> bytes:
+    return hmac.new(key.encode("utf-8"), label, hashlib.sha256).digest()
+
+
+def _keystream_xor(enc_key: bytes, nonce: bytes, data: bytes) -> bytes:
+    out = bytearray()
+    for i in range(0, len(data), 32):
+        block = hmac.new(enc_key, nonce + (i // 32).to_bytes(8, "big"), hashlib.sha256).digest()
+        out += bytes(a ^ b for a, b in zip(data[i:i + 32], block))
+    return bytes(out)
+
+
+def _mac(mac_key: bytes, tag: str, nonce: bytes, ct: bytes) -> bytes:
+    return hmac.new(mac_key, tag.encode("utf-8") + b"\x00" + nonce + ct, hashlib.sha256).digest()
+
+
+def seal(key: str, tag: str, plaintext: str) -> str:
+    nonce = _os.urandom(16)
+    ct = _keystream_xor(_subkey(key, b"enc"), nonce, plaintext.encode("utf-8"))
+    mac = _mac(_subkey(key, b"mac"), tag, nonce, ct)
+    return "e1." + base64.urlsafe_b64encode(nonce + ct + mac).decode("ascii").rstrip("=")
+
+
+def open_sealed(key: str, tag: str, sealed: str):
+    """Return plaintext, or None on any failure (bad format, wrong key/tag, tampering)."""
+    try:
+        if not (isinstance(key, str) and isinstance(tag, str) and isinstance(sealed, str)
+                and sealed.startswith("e1.")):
+            return None
+        b64 = sealed[3:]
+        raw = base64.urlsafe_b64decode((b64 + "=" * (-len(b64) % 4)).encode("ascii"))
+        if len(raw) < 48:
+            return None
+        nonce, ct, mac = raw[:16], raw[16:-32], raw[-32:]
+        if not hmac.compare_digest(mac, _mac(_subkey(key, b"mac"), tag, nonce, ct)):
+            return None
+        return _keystream_xor(_subkey(key, b"enc"), nonce, ct).decode("utf-8")
+    except Exception:
+        return None
