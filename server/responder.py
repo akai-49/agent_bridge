@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # allow running as a script
+from server.http_client import relay_urlopen
 from server.wire import a_tag, other, q_tag, sign, verify
 
 ALLOW_EXTENSIONS = frozenset({
@@ -477,6 +478,7 @@ def main(
     answer_url = f"{cfg.relay_url.rstrip('/')}/answer"
 
     rejected_qids: set[str] = set()
+    current_backoff = 1.0
 
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -490,6 +492,7 @@ def main(
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
+                current_backoff = 1.0
                 if resp.status == 200:
                     body = resp.read().decode("utf-8")
                     msg = json.loads(body)
@@ -512,7 +515,7 @@ def main(
                                 },
                                 method="POST",
                             )
-                            with urllib.request.urlopen(ans_req, timeout=30):
+                            with relay_urlopen(ans_req):
                                 pass
                         else:
                             if qid:
@@ -525,18 +528,27 @@ def main(
                     pass
         except urllib.error.HTTPError as e:
             e.close()
-            if e.code == 401:
+            if e.code in (401, 403):
                 # Session revoked or expired
+                _log_audit(cfg.audit_path, {
+                    "timestamp": time.time(),
+                    "event": "session_terminated",
+                    "status": "session_terminated",
+                    "reason": f"HTTP {e.code}: session gone (revoked or expired)",
+                    "code": e.code,
+                })
                 break
             if stop_event is not None:
-                stop_event.wait(1.0)
+                stop_event.wait(current_backoff)
             else:
-                time.sleep(1.0)
+                time.sleep(current_backoff)
+            current_backoff = min(current_backoff * 2, 30.0)
         except (urllib.error.URLError, TimeoutError, OSError):
             if stop_event is not None:
-                stop_event.wait(1.0)
+                stop_event.wait(current_backoff)
             else:
-                time.sleep(1.0)
+                time.sleep(current_backoff)
+            current_backoff = min(current_backoff * 2, 30.0)
 
         if once:
             break

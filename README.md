@@ -16,7 +16,7 @@ One machine runs the relay server and exposes it over public HTTPS:
 python3 relay/relay.py --port 8080
 ngrok http 8080
 ```
-> **Note:** Free ngrok URLs change per restart. If the relay or ngrok tunnel restarts, generate a fresh invite token.
+> **Note:** Free ngrok URLs change per restart. If the relay or ngrok tunnel restarts, generate a fresh invite token. Alternatively, deploy to Render free tier using `render.yaml` (set `BRIDGE_RELAY_KEY` from dashboard; see `docs/TWO-MACHINE-TEST.md`).
 
 ### 2. Pairing & Question Flow
 1. **Invite (Machine A):** Call `bridge_invite(relay_url="https://<ngrok-host>")`. Returns a single-use pairing token containing the relay URL, invite ID, join secret, and end-to-end signing key: `brg1.<relay>.<invite_id>.<join_secret>.<e2e_key>`.

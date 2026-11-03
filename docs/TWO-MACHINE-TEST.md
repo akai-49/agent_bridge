@@ -58,6 +58,24 @@ ngrok http 8080
 - Quick reachability check from B's machine: `curl -s -o /dev/null -w "%{http_code}\n" -X POST -d '{}' https://YOUR-URL/invite`
   prints `200` if reachable.
 
+## Hosting on Render (free)
+Alternatively, you can host the relay on Render's free tier instead of running ngrok locally:
+
+1. **Deploy:** Create a new Web Service or Blueprint from the GitHub repository (`render.yaml` sets up the service automatically with ephemeral disk at `/tmp/relay.db` and generates a secure `RELAY_KEY`).
+2. **Copy RELAY_KEY:** Go to the Render dashboard -> your service -> **Environment** tab, and copy the value of `RELAY_KEY`.
+3. **Configure Machine A:** Export `BRIDGE_RELAY_KEY` in your shell before starting Claude on Machine A:
+   ```bash
+   export BRIDGE_RELAY_KEY="<copied-RELAY_KEY>"
+   claude
+   ```
+   Claude passes this key automatically in `bridge_invite` so unauthorized users on the public internet cannot create invites.
+4. **Health check:** Check service reachability with:
+   ```bash
+   curl https://<your-service>.onrender.com/healthz
+   ```
+   prints `ok`.
+5. **Note on Free Tier Sleep & Ephemeral State:** Render's free tier spins down after 15 minutes of inactivity. When a request arrives, it wakes up (taking ~50s); the bridge and responder clients will automatically retry with backoff. Because disk storage on the free tier is ephemeral (`/tmp/relay.db`), any restart wipes existing sessions and invites. When the relay restarts, run a fresh `bridge_invite` on A and `bridge_join` on B to re-pair.
+
 ## 3. The test
 1. **A** (in Claude): *"Create a bridge invite using relay https://YOUR-URL and show me the token."*
    Expect a long `brg1.…` string. Token is single-use and expires in 15 minutes.

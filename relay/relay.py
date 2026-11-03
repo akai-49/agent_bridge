@@ -10,8 +10,10 @@ import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -102,10 +104,12 @@ class RelayServer(ThreadingHTTPServer):
         RequestHandlerClass: type[BaseHTTPRequestHandler],
         db_path: str,
         clock: Callable[[], float] = time.time,
+        relay_key: str | None = None,
     ):
         super().__init__(server_address, RequestHandlerClass)
         self.db_path = db_path
         self.clock = clock
+        self.relay_key = relay_key if relay_key is not None else os.environ.get("RELAY_KEY")
         self.conditions: dict[int, threading.Condition] = {}
         self.conditions_lock = threading.Lock()
         self.shutting_down = False
@@ -187,9 +191,20 @@ class RelayHandler(BaseHTTPRequestHandler):
         else:
             self.send_json_response(404, {"error": "not_found"})
 
+    def handle_healthz(self) -> None:
+        """GET /healthz -> 200 plain 'ok' without auth or db access."""
+        body = b"ok\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/session":
+        if parsed.path == "/healthz":
+            self.handle_healthz()
+        elif parsed.path == "/session":
             self.handle_session(parsed)
         # Extension point for Task 3 GET endpoints (/poll, /result/<qid>)
         elif self.handle_task3_get(parsed):
@@ -542,6 +557,15 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def handle_invite(self) -> None:
         """POST /invite {} -> {invite_id, join_secret, poll_secret}."""
+        relay_key = getattr(self.server, "relay_key", None)
+        if relay_key is None:
+            relay_key = os.environ.get("RELAY_KEY")
+        if relay_key:
+            client_key = self.headers.get("X-Relay-Key") or ""
+            if not hmac.compare_digest(client_key, relay_key):
+                self.send_json_response(401, {"error": "unauthorized"})
+                return
+
         body = self.read_json_body()
         if body is None:
             self.send_json_response(400, {"error": "invalid_json"})
@@ -742,21 +766,35 @@ def make_server(
     host: str = "127.0.0.1",
     port: int = 8080,
     clock: Callable[[], float] = time.time,
+    relay_key: str | None = None,
 ) -> ThreadingHTTPServer:
     """Create and return a configured ThreadingHTTPServer instance."""
     init_db(db_path)
-    return RelayServer((host, port), RelayHandler, db_path=db_path, clock=clock)
+    return RelayServer((host, port), RelayHandler, db_path=db_path, clock=clock, relay_key=relay_key)
 
 
 def main() -> None:
     """CLI entrypoint with --port, --host, and --db arguments."""
+    default_host = os.environ.get("RELAY_HOST", "127.0.0.1")
+    default_port_str = os.environ.get("PORT", "8080")
+    try:
+        default_port = int(default_port_str)
+    except ValueError:
+        default_port = 8080
+    default_db = os.environ.get("RELAY_DB", "relay.db")
+
     parser = argparse.ArgumentParser(description="claude-bridge relay server")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8080, help="Port to bind to (default: 8080)")
-    parser.add_argument("--db", default="relay.db", help="Path to SQLite database (default: relay.db)")
+    parser.add_argument("--host", default=default_host, help=f"Host to bind to (default: {default_host})")
+    parser.add_argument("--port", type=int, default=default_port, help=f"Port to bind to (default: {default_port})")
+    parser.add_argument("--db", default=default_db, help=f"Path to SQLite database (default: {default_db})")
     args = parser.parse_args()
 
-    server = make_server(args.db, args.host, args.port)
+    relay_key = os.environ.get("RELAY_KEY")
+    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    if args.host not in loopback_hosts and not relay_key:
+        sys.exit(f"Error: RELAY_KEY environment variable is required when binding to non-loopback host '{args.host}'.")
+
+    server = make_server(args.db, args.host, args.port, relay_key=relay_key)
     print(f"Relay serving on http://{args.host}:{args.port} (db: {args.db})")
     try:
         server.serve_forever()

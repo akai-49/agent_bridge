@@ -23,6 +23,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # allow running as a script
 from server import wire
+from server.http_client import relay_urlopen
+
+SESSION_REJECTED_MSG = (
+    "The relay no longer accepts this session (revoked, expired, "
+    "or the relay restarted and lost its data). Run a fresh bridge_invite and join again."
+)
 
 HOME = Path(os.environ.get("BRIDGE_HOME") or Path.home() / ".claude-bridge")
 PEERS, GRANTS, INBOX = HOME / "peers.json", HOME / "grants.json", HOME / "inbox"
@@ -252,20 +258,31 @@ def t_bridge_invite(relay_url):
 
     clean_relay = relay_url.strip().rstrip("/")
     invite_url = f"{clean_relay}/invite"
+    headers = {"Content-Type": "application/json"}
+    relay_key = os.environ.get("BRIDGE_RELAY_KEY")
+    if relay_key:
+        headers["X-Relay-Key"] = relay_key
+
     req = urllib.request.Request(
         invite_url,
         data=b"{}",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with relay_urlopen(req) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         code = e.code
         body = e.read().decode("utf-8", errors="replace")
         e.close()
+        if code == 401:
+            raise BridgeError(
+                "Relay requires a relay key: set BRIDGE_RELAY_KEY in the environment you start claude from."
+            ) from e
         raise BridgeError(f"Relay returned HTTP {code}: {body}") from e
+    except BridgeError:
+        raise
     except Exception as e:
         raise BridgeError(f"Failed to connect to relay at '{relay_url}': {e}") from e
 
@@ -324,7 +341,7 @@ def t_bridge_join(token, confirm_relay):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with relay_urlopen(req) as resp:
             resp_data = json.loads(resp.read().decode("utf-8"))
             session_b = resp_data.get("session_b")
             if not session_b:
@@ -417,7 +434,7 @@ def t_bridge_serve(confirm_folder):
                 method="GET",
             )
             try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with relay_urlopen(req) as resp:
                     if resp.status == 204:
                         raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.")
                     sess_data = json.loads(resp.read().decode("utf-8"))
@@ -433,7 +450,7 @@ def t_bridge_serve(confirm_folder):
                 if code == 204:
                     raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.") from e
                 if code == 401:
-                    raise BridgeError("Session revoked, expired, or invalid poll secret.") from e
+                    raise BridgeError(SESSION_REJECTED_MSG) from e
                 raise BridgeError(f"Error fetching session: HTTP {code} {body}") from e
             except BridgeError:
                 raise
@@ -515,7 +532,7 @@ def t_bridge_ask(question):
                 method="GET",
             )
             try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with relay_urlopen(req) as resp:
                     if resp.status == 204:
                         raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.")
                     sess_data = json.loads(resp.read().decode("utf-8"))
@@ -531,7 +548,7 @@ def t_bridge_ask(question):
                 if code == 204:
                     raise BridgeError("Peer has not joined yet. Waiting for peer to call bridge_join.") from e
                 if code == 401:
-                    raise BridgeError("Session revoked, expired, or invalid poll secret.") from e
+                    raise BridgeError(SESSION_REJECTED_MSG) from e
                 raise BridgeError(f"Error fetching session: HTTP {code} {body}") from e
             except BridgeError:
                 raise
@@ -560,7 +577,7 @@ def t_bridge_ask(question):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with relay_urlopen(req) as resp:
             ask_data = json.loads(resp.read().decode("utf-8"))
             qid = ask_data.get("qid")
             if not qid:
@@ -576,7 +593,7 @@ def t_bridge_ask(question):
         if code == 429:
             raise BridgeError("Rate limit exceeded (max 20 questions/hour).") from e
         if code == 401:
-            raise BridgeError("Session revoked or expired.") from e
+            raise BridgeError(SESSION_REJECTED_MSG) from e
         raise BridgeError(f"Failed to post question: HTTP {code} {body}") from e
     except BridgeError:
         raise
@@ -597,7 +614,7 @@ def t_bridge_ask(question):
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=wait_s + 5) as resp:
+            with relay_urlopen(req, timeout=wait_s + 5) as resp:
                 if resp.status == 200:
                     res_data = json.loads(resp.read().decode("utf-8"))
                     answer_text = res_data.get("a")
@@ -612,7 +629,7 @@ def t_bridge_ask(question):
             if code == 204:
                 continue
             if code == 401:
-                raise BridgeError("Session revoked or expired while waiting for answer.") from e
+                raise BridgeError(SESSION_REJECTED_MSG) from e
             raise BridgeError(f"Relay error waiting for answer: HTTP {code} {body}") from e
         except (urllib.error.URLError, TimeoutError, OSError):
             continue
@@ -664,9 +681,7 @@ def t_bridge_status():
     if role == "B":
         paired = bool(net.get("session_b") or net.get("session"))
     elif role == "A":
-        if net.get("session_a"):
-            paired = True
-        elif net.get("invite_id") and net.get("poll_secret") and relay_url:
+        if net.get("invite_id") and net.get("poll_secret") and relay_url:
             try:
                 sess_url = f"{relay_url.rstrip('/')}/session?invite_id={urllib.parse.quote(net['invite_id'])}"
                 req = urllib.request.Request(
@@ -674,7 +689,7 @@ def t_bridge_status():
                     headers={"X-Poll-Secret": net["poll_secret"]},
                     method="GET",
                 )
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with relay_urlopen(req) as resp:
                     if resp.status == 200:
                         sess_data = json.loads(resp.read().decode("utf-8"))
                         session_a = sess_data.get("session_a")
@@ -682,8 +697,18 @@ def t_bridge_status():
                             net["session_a"] = session_a
                             secure_jwrite(net_file, net)
                             paired = True
-            except Exception:
+                    elif resp.status == 204:
+                        paired = False
+            except urllib.error.HTTPError as e:
+                code = e.code
+                e.close()
+                if code == 401:
+                    raise BridgeError(SESSION_REJECTED_MSG) from e
                 paired = False
+            except Exception:
+                paired = bool(net.get("session_a"))
+        elif net.get("session_a"):
+            paired = True
 
     pid = net.get("responder_pid")
     serving = bool(pid and is_pid_alive(pid))
@@ -720,7 +745,7 @@ def t_bridge_net_revoke():
                     headers={"X-Poll-Secret": poll_secret},
                     method="GET",
                 )
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with relay_urlopen(req) as resp:
                     if resp.status == 200:
                         sess_data = json.loads(resp.read().decode("utf-8"))
                         session_token = sess_data.get("session_a")
@@ -739,7 +764,7 @@ def t_bridge_net_revoke():
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=5):
+            with relay_urlopen(req):
                 pass
         except Exception:
             pass

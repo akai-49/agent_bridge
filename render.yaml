@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: agent-bridge-relay
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: echo build-ok
+    startCommand: python3 relay/relay.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: RELAY_HOST
+        value: 0.0.0.0
+      - key: RELAY_DB
+        value: /tmp/relay.db
+      - key: RELAY_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.12.8
